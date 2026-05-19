@@ -1,3 +1,5 @@
+import { listDirectory } from "@/commands/fs"
+import { normalizePath } from "@/lib/path-utils"
 import type { FileNode } from "@/types/wiki"
 
 /**
@@ -64,22 +66,116 @@ export function findInTreeByName(
  * matches. Always restricts the lookup to `wiki/` to avoid pulling
  * in a same-named file from `raw/sources/`.
  */
+/**
+ * Match a wikilink / related slug against known page ids (filename
+ * without `.md`). Handles case, spaces-vs-hyphens, and a single
+ * unambiguous suffix match (`spark` → `apache-spark`).
+ */
+export function resolveWikiSlugId(
+  raw: string,
+  knownIds: Iterable<string>,
+): string | null {
+  const ref = raw.trim().replace(/\.md$/i, "")
+  if (!ref) return null
+
+  const ids = [...knownIds]
+  if (ids.includes(ref)) return ref
+
+  const normalized = ref.toLowerCase().replace(/\s+/g, "-")
+  const exactCi = ids.filter((id) => id.toLowerCase() === normalized)
+  if (exactCi.length === 1) return exactCi[0]
+
+  const hyphenNorm = ids.filter(
+    (id) => id.toLowerCase().replace(/\s+/g, "-") === normalized,
+  )
+  if (hyphenNorm.length === 1) return hyphenNorm[0]
+
+  const suffixMatches = ids.filter((id) => {
+    const lower = id.toLowerCase()
+    return lower === normalized || lower.endsWith(`-${normalized}`)
+  })
+  if (suffixMatches.length === 1) return suffixMatches[0]
+
+  return null
+}
+
+/** Case-insensitive dedupe; first-seen casing wins. */
+export function dedupePageIds(ids: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of ids) {
+    const key = id.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(id)
+  }
+  return out
+}
+
+/** Resolve shorthand refs to canonical page ids and dedupe (for `related:` writes). */
+export function canonicalizePageIds(
+  rawRefs: readonly string[],
+  knownIds: Iterable<string>,
+): string[] {
+  const resolved = rawRefs.map((raw) => {
+    const { slug } = unwrapWikilink(raw)
+    return resolveWikiSlugId(slug, knownIds) ?? slug
+  })
+  return dedupePageIds(resolved)
+}
+
+/** All wiki page ids (filename without `.md`) under `wiki/`. */
+export function listWikiPageIdsFromTree(tree: FileNode[], wikiRoot: string): string[] {
+  const ids: string[] = []
+  const walk = (nodes: FileNode[]) => {
+    for (const node of nodes) {
+      if (node.is_dir && node.children) {
+        walk(node.children)
+        continue
+      }
+      if (node.is_dir || !node.name.endsWith(".md")) continue
+      if (!node.path.includes(`${wikiRoot}/`)) continue
+      ids.push(node.name.replace(/\.md$/i, ""))
+    }
+  }
+  walk(tree)
+  return ids
+}
+
+export async function listWikiPageIds(projectPath: string): Promise<string[]> {
+  const pp = normalizePath(projectPath)
+  const wikiRoot = `${pp}/wiki`
+  try {
+    const tree = await listDirectory(wikiRoot)
+    return listWikiPageIdsFromTree(tree, wikiRoot)
+  } catch {
+    return []
+  }
+}
+
 export function resolveRelatedSlug(
   tree: FileNode[],
   ref: string,
   wikiRoot: string,
 ): string | null {
+  const { slug } = unwrapWikilink(ref)
+
   // Path-like → resolve relative to project root (one segment up
   // from wikiRoot).
-  if (ref.includes("/")) {
+  if (slug.includes("/")) {
     const projectRoot = wikiRoot.replace(/\/wiki$/, "")
-    const target = `${projectRoot}/${ref}`
+    const target = `${projectRoot}/${slug}`
     const found = findInTreeByPath(tree, target)
     return found && found.includes(`${wikiRoot}/`) ? found : null
   }
 
-  const filename = ref.endsWith(".md") ? ref : `${ref}.md`
-  return findInTreeByName(tree, filename, `${wikiRoot}/`)
+  const filename = slug.endsWith(".md") ? slug : `${slug}.md`
+  const exact = findInTreeByName(tree, filename, `${wikiRoot}/`)
+  if (exact) return exact
+
+  const resolved = resolveWikiSlugId(slug, listWikiPageIdsFromTree(tree, wikiRoot))
+  if (!resolved) return null
+  return findInTreeByName(tree, `${resolved}.md`, `${wikiRoot}/`)
 }
 
 /**

@@ -83,24 +83,50 @@ function nodeSize(linkCount: number, maxLinks: number): number {
 const positionCache = new Map<string, { x: number; y: number }>()
 let lastLayoutDataKey = ""
 
+/** Stable fingerprint of graph topology — edge *count* alone misses link changes. */
+function graphTopologyKey(nodes: GraphNode[], edges: GraphEdge[]): string {
+  const nodePart = nodes.map((n) => n.id).sort().join(",")
+  const edgePart = edges
+    .map((e) => `${e.source}->${e.target}`)
+    .sort()
+    .join(",")
+  return `${nodePart}|${edgePart}`
+}
+
+/** Deterministic seed positions — avoids random layout jumps between reloads. */
+function seedPosition(nodeId: string): { x: number; y: number } {
+  let h1 = 0
+  let h2 = 0
+  for (let i = 0; i < nodeId.length; i++) {
+    const c = nodeId.charCodeAt(i)
+    h1 = (h1 * 31 + c) | 0
+    h2 = (h2 * 33 + c) | 0
+  }
+  return {
+    x: ((h1 >>> 0) % 1000) / 10,
+    y: ((h2 >>> 0) % 1000) / 10,
+  }
+}
+
 function GraphLoader({ nodes, edges, colorMode }: { nodes: GraphNode[]; edges: GraphEdge[]; colorMode: ColorMode }) {
   const loadGraph = useLoadGraph()
 
   useEffect(() => {
-    const dataKey = nodes.map((n) => n.id).sort().join(",") + "|" + edges.length
+    const dataKey = graphTopologyKey(nodes, edges)
     const needsLayout = dataKey !== lastLayoutDataKey
 
     const graph = new Graph()
     const maxLinks = Math.max(...nodes.map((n) => n.linkCount), 1)
 
     for (const node of nodes) {
-      const cached = positionCache.get(node.id)
+      const cached = needsLayout ? undefined : positionCache.get(node.id)
+      const seed = seedPosition(node.id)
       const color = colorMode === "community"
         ? COMMUNITY_COLORS[node.community % COMMUNITY_COLORS.length]
         : nodeColor(node.type)
       graph.addNode(node.id, {
-        x: cached?.x ?? Math.random() * 100,
-        y: cached?.y ?? Math.random() * 100,
+        x: cached?.x ?? seed.x,
+        y: cached?.y ?? seed.y,
         size: nodeSize(node.linkCount, maxLinks),
         color,
         label: node.label,
@@ -131,22 +157,23 @@ function GraphLoader({ nodes, edges, colorMode }: { nodes: GraphNode[]; edges: G
       }
     }
 
-    // Only run expensive ForceAtlas2 layout when data actually changed
+    // Only run expensive ForceAtlas2 layout when topology actually changed
     if (needsLayout && nodes.length > 1) {
+      positionCache.clear()
       const settings = forceAtlas2.inferSettings(graph)
+      const iterations = nodes.length > 30 ? 250 : 150
       forceAtlas2.assign(graph, {
-        iterations: 150,
+        iterations,
         settings: {
           ...settings,
           gravity: 1,
-          scalingRatio: 2,
+          scalingRatio: nodes.length > 25 ? 3 : 2,
           strongGravityMode: true,
           barnesHutOptimize: nodes.length > 50,
         },
       })
       lastLayoutDataKey = dataKey
 
-      // Cache computed positions
       graph.forEachNode((nodeId, attrs) => {
         positionCache.set(nodeId, { x: attrs.x, y: attrs.y })
       })
@@ -389,10 +416,15 @@ export function GraphView() {
     })
   }, [t])
 
+  // Debounce reloads: ingest/post-pass writes many wiki files in bursts,
+  // and file-sync bumps dataVersion for each batch — without debouncing
+  // the graph re-layouts repeatedly and looks unstable.
   useEffect(() => {
-    if (dataVersion !== lastLoadedVersion.current) {
-      loadGraph()
-    }
+    if (dataVersion === lastLoadedVersion.current) return
+    const timer = window.setTimeout(() => {
+      void loadGraph()
+    }, 450)
+    return () => window.clearTimeout(timer)
   }, [loadGraph, dataVersion])
 
   useEffect(() => {
@@ -744,8 +776,8 @@ export function GraphView() {
               labelSize: 13,
               labelWeight: "bold",
               labelColor: { color: "#1e293b" },
-              labelDensity: 0.4,
-              labelRenderedSizeThreshold: 6,
+              labelDensity: 0.25,
+              labelRenderedSizeThreshold: 8,
               stagePadding: 30,
               nodeReducer: (_node, attrs) => {
                 const result = { ...attrs }

@@ -21,8 +21,10 @@ src-tauri/gen/
 .env.local
 .env.*.local
 
-# Internal docs (not shipped)
-docs/
+# Internal docs (not shipped) — ADRs are versioned
+docs/*
+!docs/adr/
+!docs/adr/**
 AGENTS.md
 
 # Benchmark and test data (local only)

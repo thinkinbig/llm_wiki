@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest"
 import type { FileNode } from "@/types/wiki"
 import {
+  canonicalizePageIds,
+  dedupePageIds,
   findInTreeByName,
+  listWikiPageIdsFromTree,
   resolveRelatedSlug,
+  resolveWikiSlugId,
   resolveSourceName,
   unwrapWikilink,
 } from "./wiki-page-resolver"
@@ -103,6 +107,56 @@ describe("findInTreeByName", () => {
   })
 })
 
+describe("dedupePageIds", () => {
+  it("keeps first-seen casing and drops case-insensitive duplicates", () => {
+    expect(dedupePageIds(["apache-spark", "Apache-Spark", "hdfs"])).toEqual([
+      "apache-spark",
+      "hdfs",
+    ])
+  })
+})
+
+describe("canonicalizePageIds", () => {
+  it("resolves shorthand and dedupes aliases to the same page id", () => {
+    expect(
+      canonicalizePageIds(["spark", "apache-spark", "hdfs"], [
+        "apache-spark",
+        "hadoop",
+        "hdfs",
+      ]),
+    ).toEqual(["apache-spark", "hdfs"])
+  })
+})
+
+describe("listWikiPageIdsFromTree", () => {
+  it("collects .md basenames under wiki/", () => {
+    expect(
+      listWikiPageIdsFromTree(
+        [
+          {
+            name: "apache-spark.md",
+            path: `${WIKI}/entities/apache-spark.md`,
+            is_dir: false,
+          },
+        ],
+        WIKI,
+      ),
+    ).toEqual(["apache-spark"])
+  })
+})
+
+describe("resolveWikiSlugId", () => {
+  it("resolves an unambiguous suffix match (spark → apache-spark)", () => {
+    expect(
+      resolveWikiSlugId("spark", ["apache-spark", "hadoop", "hdfs"]),
+    ).toBe("apache-spark")
+  })
+
+  it("returns null when suffix match is ambiguous", () => {
+    expect(resolveWikiSlugId("spark", ["apache-spark", "delta-spark"])).toBeNull()
+  })
+})
+
 describe("resolveRelatedSlug", () => {
   it("appends .md and finds entities by bare slug", () => {
     expect(resolveRelatedSlug(TREE, "foo", WIKI)).toBe(`${WIKI}/entities/foo.md`)
@@ -132,6 +186,17 @@ describe("resolveRelatedSlug", () => {
 
   it("returns null when slug doesn't exist", () => {
     expect(resolveRelatedSlug(TREE, "ghost", WIKI)).toBeNull()
+  })
+
+  it("resolves a short related slug via suffix match on disk", () => {
+    const tree: FileNode[] = [
+      {
+        name: "apache-spark.md",
+        path: `${WIKI}/entities/apache-spark.md`,
+        is_dir: false,
+      },
+    ]
+    expect(resolveRelatedSlug(tree, "spark", WIKI)).toBe(`${WIKI}/entities/apache-spark.md`)
   })
 
   it("returns null when path-like ref doesn't exist", () => {
