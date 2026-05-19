@@ -296,6 +296,7 @@
         "activeBadge": "活跃",
         "savedBadge": "已保存",
         "instanceUrl": "实例 URL",
+        "ollamaHint": "使用本地 Ollama 内置的网页搜索功能。请确保 Ollama 正在运行，并且有支持网页搜索的模型可用。",
         "searxngJsonHint": "实例必须允许 JSON 搜索响应（`format=json`）。",
         "searchCategories": "搜索分类",
         "searxngCategoriesHint": "分类会作为 SearXNG 的 `categories` 参数发送。",

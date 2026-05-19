@@ -41,7 +41,7 @@ export const SEARXNG_CATEGORY_OPTIONS: { value: SearXngCategory; label: string; 
 
 export function resolveSearchConfig(config: SearchApiConfig): SearchApiConfig {
   const providerConfigs: SearchProviderConfigs = config.providerConfigs ?? {
-    ...(config.provider !== "none" && config.apiKey
+    ...(config.provider !== "none" && config.provider !== "ollama" && config.apiKey
       ? {
           [config.provider]: {
             apiKey: config.apiKey,
@@ -59,6 +59,13 @@ export function resolveSearchConfig(config: SearchApiConfig): SearchApiConfig {
           },
         }
       : {}),
+    ...(config.provider === "ollama" && config.ollamaUrl
+      ? {
+          ollama: {
+            ollamaUrl: config.ollamaUrl,
+          },
+        }
+      : {}),
   }
 
   const activeProvider = config.provider as SearchProvider
@@ -70,6 +77,7 @@ export function resolveSearchConfig(config: SearchApiConfig): SearchApiConfig {
       serpApiEngine: config.serpApiEngine ?? providerConfigs.serpapi?.serpApiEngine ?? "google",
       searXngUrl: config.searXngUrl ?? providerConfigs.searxng?.searXngUrl ?? "",
       searXngCategories: config.searXngCategories ?? providerConfigs.searxng?.searXngCategories ?? ["general"],
+      ollamaUrl: config.ollamaUrl ?? providerConfigs.ollama?.ollamaUrl ?? "http://localhost:11434",
       providerConfigs,
     }
   }
@@ -82,6 +90,7 @@ export function resolveSearchConfig(config: SearchApiConfig): SearchApiConfig {
     serpApiEngine: activeOverride?.serpApiEngine ?? config.serpApiEngine ?? "google",
     searXngUrl: activeOverride?.searXngUrl ?? config.searXngUrl ?? "",
     searXngCategories: activeOverride?.searXngCategories ?? config.searXngCategories ?? ["general"],
+    ollamaUrl: activeOverride?.ollamaUrl ?? config.ollamaUrl ?? "http://localhost:11434",
     providerConfigs,
   }
 }
@@ -118,6 +127,8 @@ export async function webSearch(
       return serpApiSearch(query, resolved.apiKey, maxResults, resolved.serpApiEngine ?? "google")
     case "searxng":
       return searXngSearch(query, resolved.searXngUrl ?? "", maxResults, resolved.searXngCategories ?? ["general"])
+    case "ollama":
+      return ollamaSearch(query, resolved.ollamaUrl ?? "http://localhost:11434", maxResults)
     default:
       throw new Error(`Unknown search provider: ${resolved.provider}`)
   }
@@ -340,4 +351,70 @@ function normalizeSerpApiResult(item: unknown): WebSearchResult {
     snippet: r.snippet ?? r.summary ?? r.description ?? "",
     source: hostnameFromUrl(url) || r.source || r.displayed_link || "",
   }
+}
+
+interface OllamaSearchResponse {
+  results?: Array<{
+    title?: string
+    url?: string
+    content?: string
+  }>
+  error?: string
+}
+
+async function ollamaSearch(
+  query: string,
+  ollamaUrl: string,
+  maxResults: number,
+): Promise<WebSearchResult[]> {
+  const baseUrl = ollamaUrl.replace(/\/+$/, "")
+  const searchUrl = `${baseUrl}/api/experimental/web_search`
+
+  const httpFetch = await getHttpFetch()
+  let response: Response
+  try {
+    response = await httpFetch(searchUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        max_results: maxResults,
+      }),
+    })
+  } catch (err) {
+    if (isFetchNetworkError(err)) {
+      throw new Error(
+        `Network error reaching Ollama at ${baseUrl}. Make sure Ollama is running and web search is enabled.`,
+      )
+    }
+    throw err
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error(
+        "Ollama requires authentication. Run `ollama signin` in your terminal to authenticate.",
+      )
+    }
+    const errorText = await response.text().catch(() => "Unknown error")
+    throw new Error(`Ollama web search failed (${response.status}): ${errorText}`)
+  }
+
+  const data = (await response.json()) as OllamaSearchResponse
+
+  if (data.error) {
+    throw new Error(`Ollama web search error: ${data.error}`)
+  }
+
+  return (data.results ?? [])
+    .slice(0, maxResults)
+    .map((r) => {
+      const url = r.url ?? ""
+      return {
+        title: r.title ?? "Untitled",
+        url,
+        snippet: r.content ?? "",
+        source: hostnameFromUrl(url),
+      }
+    })
 }

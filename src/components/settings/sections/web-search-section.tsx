@@ -13,6 +13,14 @@ import { SEARXNG_CATEGORY_OPTIONS, SERPAPI_ENGINE_OPTIONS, resolveSearchConfig }
 
 const SEARCH_PROVIDERS = [
   {
+    id: "ollama",
+    label: "Ollama (Local)",
+    hint: "Free web search via your local Ollama instance — no API key required",
+    urlPlaceholder: "http://localhost:11434",
+    needsApiKey: false,
+    isLocal: true,
+  },
+  {
     id: "tavily",
     label: "Tavily",
     hint: "General web search for Deep Research",
@@ -82,6 +90,8 @@ export function WebSearchSection() {
           const isActive = resolvedConfig.provider === provider.id
           const hasConfig = provider.id === "searxng"
             ? !!override?.searXngUrl
+            : provider.id === "ollama"
+            ? !!override?.ollamaUrl
             : !!override?.apiKey
           const isExpanded = !!expanded[provider.id]
           return (
@@ -149,7 +159,20 @@ export function WebSearchSection() {
 
               {isExpanded && (
                 <div className="space-y-4 border-t bg-background/50 px-4 py-3">
-                  {provider.needsApiKey ? (
+                  {"isLocal" in provider && provider.isLocal ? (
+                    // Ollama: URL field without API key
+                    <div className="space-y-2">
+                      <Label>{t("settings.sections.webSearch.instanceUrl")}</Label>
+                      <Input
+                        value={override?.ollamaUrl ?? resolvedConfig.ollamaUrl ?? "http://localhost:11434"}
+                        onChange={(e) => updateProvider("ollama", { ollamaUrl: e.target.value })}
+                        placeholder={provider.urlPlaceholder}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t("settings.sections.webSearch.ollamaHint")}
+                      </p>
+                    </div>
+                  ) : provider.needsApiKey ? (
                     <div className="space-y-2">
                       <Label>{t("settings.apiKey")}</Label>
                       <Input
