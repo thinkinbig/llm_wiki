@@ -59,6 +59,18 @@ describe("parseSources — inline `sources: [...]`", () => {
     expect(parseSources("# heading\n\nbody")).toEqual([])
   })
 
+  it("does not split on commas inside quoted filenames", () => {
+    // Filename contains commas — LLM should quote it; parser must honour the quotes.
+    const filename = "Reliable, Scalable, and Maintainable Systems.pdf"
+    expect(parseSources(WRAP(`sources: ["${filename}"]`))).toEqual([filename])
+  })
+
+  it("handles multiple entries where one filename contains a comma", () => {
+    expect(
+      parseSources(WRAP(`sources: ["Reliable, Scalable.pdf", "other.md"]`)),
+    ).toEqual(["Reliable, Scalable.pdf", "other.md"])
+  })
+
   it("handles CJK-named source files", () => {
     expect(parseSources(WRAP('sources: ["测试.md", "test.md"]'))).toEqual([
       "测试.md",

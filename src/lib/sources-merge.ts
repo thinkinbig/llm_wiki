@@ -33,6 +33,35 @@
  * The field name is matched as a whole word at line start, so
  * `parseFrontmatterArray(c, "rel")` won't match `related: [...]`.
  */
+
+/**
+ * Split a YAML inline array body (the part between `[` and `]`) on
+ * commas, but skip commas that are inside quoted strings. This prevents
+ * filenames that contain commas (e.g. "Reliable, Scalable, and
+ * Maintainable Systems.pdf") from being incorrectly split into multiple
+ * entries when the LLM quotes them: `sources: ["name, with, commas.pdf"]`.
+ */
+function splitYamlInlineArray(body: string): string[] {
+  const items: string[] = []
+  let current = ""
+  let inSingle = false
+  let inDouble = false
+  for (const ch of body) {
+    if (ch === '"' && !inSingle) { inDouble = !inDouble; continue }
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; continue }
+    if (ch === "," && !inDouble && !inSingle) {
+      const v = current.trim()
+      if (v) items.push(v)
+      current = ""
+      continue
+    }
+    current += ch
+  }
+  const last = current.trim()
+  if (last) items.push(last)
+  return items.filter((s) => s.length > 0)
+}
+
 export function parseFrontmatterArray(content: string, fieldName: string): string[] {
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
   if (!fmMatch) return []
@@ -59,10 +88,7 @@ export function parseFrontmatterArray(content: string, fieldName: string): strin
   if (inline) {
     const body = inline[1].trim()
     if (body === "") return []
-    return body
-      .split(",")
-      .map((s) => s.trim().replace(/^["']|["']$/g, ""))
-      .filter((s) => s.length > 0)
+    return splitYamlInlineArray(body)
   }
 
   // Scalar form: `sources: paper.pdf` (common LLM mistake).
