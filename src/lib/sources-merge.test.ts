@@ -19,6 +19,7 @@ import {
   mergeSourcesIntoContent,
   mergeArrayFieldsIntoContent,
   parseFrontmatterArray,
+  ensureSourcesInContent,
 } from "./sources-merge"
 
 const WRAP = (fm: string, body = "body\n") => `---\n${fm}\n---\n${body}`
@@ -63,6 +64,10 @@ describe("parseSources — inline `sources: [...]`", () => {
       "测试.md",
       "test.md",
     ])
+  })
+
+  it("parses scalar `sources: filename.pdf` form", () => {
+    expect(parseSources(WRAP("sources: 1312.4400v3.pdf"))).toEqual(["1312.4400v3.pdf"])
   })
 })
 
@@ -140,6 +145,34 @@ describe("writeSources", () => {
 })
 
 // ── mergeSourcesLists ───────────────────────────────────────────────
+
+describe("ensureSourcesInContent", () => {
+  it("injects sources when the field is missing", () => {
+    const out = ensureSourcesInContent(WRAP("title: Foo", "body"), "paper.pdf")
+    expect(parseSources(out)).toEqual(["paper.pdf"])
+  })
+
+  it("unions with existing sources via Set dedup", () => {
+    const out = ensureSourcesInContent(
+      WRAP('sources: ["a.pdf", "b.pdf"]'),
+      "b.pdf",
+    )
+    expect(parseSources(out)).toEqual(["a.pdf", "b.pdf"])
+  })
+
+  it("adds the ingest source when LLM emitted a scalar sources field", () => {
+    const out = ensureSourcesInContent(
+      WRAP("sources: old.pdf", "body"),
+      "new.pdf",
+    )
+    expect(parseSources(out)).toEqual(["old.pdf", "new.pdf"])
+  })
+
+  it("returns the same reference when already satisfied", () => {
+    const page = WRAP('sources: ["paper.pdf"]')
+    expect(ensureSourcesInContent(page, "paper.pdf")).toBe(page)
+  })
+})
 
 describe("mergeSourcesLists", () => {
   it("unions disjoint lists in order", () => {

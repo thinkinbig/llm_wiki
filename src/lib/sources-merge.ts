@@ -56,13 +56,24 @@ export function parseFrontmatterArray(content: string, fieldName: string): strin
 
   const inlineRe = new RegExp(`^${escapedName}:\\s*\\[([^\\]]*)\\]`, "m")
   const inline = fm.match(inlineRe)
-  if (!inline) return []
-  const body = inline[1].trim()
-  if (body === "") return []
-  return body
-    .split(",")
-    .map((s) => s.trim().replace(/^["']|["']$/g, ""))
-    .filter((s) => s.length > 0)
+  if (inline) {
+    const body = inline[1].trim()
+    if (body === "") return []
+    return body
+      .split(",")
+      .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+      .filter((s) => s.length > 0)
+  }
+
+  // Scalar form: `sources: paper.pdf` (common LLM mistake).
+  const scalarRe = new RegExp(`^${escapedName}:\\s*(.+)$`, "m")
+  const scalar = fm.match(scalarRe)
+  if (scalar) {
+    const val = scalar[1].trim().replace(/^["']|["']$/g, "")
+    if (val.length > 0 && !val.startsWith("[")) return [val]
+  }
+
+  return []
 }
 
 /**
@@ -201,6 +212,29 @@ export function mergeSourcesLists(
   incoming: readonly string[],
 ): string[] {
   return mergeLists(existing, incoming)
+}
+
+/**
+ * Guarantee `sources` contains `requiredSource` (Set union, case-insensitive).
+ * Used at ingest write time so source-delete can find provenance on every
+ * entity/concept page even when the LLM omits or malforms `sources:`.
+ */
+export function ensureSourcesInContent(
+  content: string,
+  requiredSource: string,
+): string {
+  const required = requiredSource.trim()
+  if (!required || !/^---\n/.test(content)) return content
+
+  const merged = mergeSourcesLists(parseSources(content), [required])
+  const current = parseSources(content)
+  if (
+    merged.length === current.length &&
+    merged.every((s, i) => s === current[i])
+  ) {
+    return content
+  }
+  return writeSources(content, merged)
 }
 
 /**

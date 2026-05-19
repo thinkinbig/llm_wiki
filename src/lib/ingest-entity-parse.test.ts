@@ -1,9 +1,8 @@
 import { describe, it, expect } from "vitest"
 import { dedupAndBatchEntities } from "./ingest"
 
-// Note: parseEntityListFromAnalysis was removed when the parser moved
-// to `./analysis` as `parseAnalysisOutput`. Tests for that parser live
-// in `./analysis.test.ts`.
+// Entity manifest parsing lives in `./analysis` (`parseAnalysisOutput`).
+// Tests for that parser live in `./analysis.test.ts`.
 
 describe("dedupAndBatchEntities", () => {
   it("returns empty array for empty input", () => {

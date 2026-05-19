@@ -1,10 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest"
-import {
-  buildAnalysisPrompt,
-  buildGenerationPrompt,
-  buildEntityBatchPrompt,
-  type AnalysisEntity,
-} from "./ingest"
+import { buildAnalysisPrompt, type AnalysisEntity } from "./analysis"
+import { buildGenerationPrompt, buildEntityBatchPrompt } from "./ingest"
 import { useWikiStore } from "@/stores/wiki-store"
 
 beforeEach(() => {
@@ -45,7 +41,13 @@ describe("buildAnalysisPrompt language directive", () => {
     expect(prompt).toContain("## Recommendations")
   })
 
-  it("instructs the model to emit the <entities> manifest block first", () => {
+  it("requires emitting a complete entities manifest", () => {
+    const prompt = buildAnalysisPrompt("", "", "")
+    expect(prompt).toMatch(/Include EVERY entity and concept worth a dedicated wiki page/i)
+    expect(prompt).toMatch(/Do not pre-filter/i)
+  })
+
+  it("instructs the model to emit the entities block first", () => {
     // Without this manifest the downstream batched-generation
     // pipeline can't tell which entity pages to write per batch
     // and falls back to one giant Generation call. The block must
@@ -99,7 +101,7 @@ describe("buildEntityBatchPrompt", () => {
   ]
 
   it("lists every batch item under its type heading", () => {
-    const prompt = buildEntityBatchPrompt("", "", "", "src.pdf", SAMPLE_BATCH)
+    const prompt = buildEntityBatchPrompt("", "", [], "src.pdf", SAMPLE_BATCH)
     expect(prompt).toContain("- Activity Based Costing")
     expect(prompt).toContain("- Cost Accounting")
     expect(prompt).toContain("- Prof Kaplan")
@@ -108,7 +110,7 @@ describe("buildEntityBatchPrompt", () => {
   it("forbids writing source summary / index / log / overview pages", () => {
     // Those are written by the final global Generation call; if a batch
     // emits them they either get discarded or clobber the global write.
-    const prompt = buildEntityBatchPrompt("", "", "", "src.pdf", SAMPLE_BATCH)
+    const prompt = buildEntityBatchPrompt("", "", [], "src.pdf", SAMPLE_BATCH)
     expect(prompt).toMatch(/DO NOT write `wiki\/sources/)
     expect(prompt).toMatch(/DO NOT write `wiki\/index\.md`/)
     expect(prompt).toMatch(/DO NOT write `wiki\/log\.md`/)
@@ -117,12 +119,12 @@ describe("buildEntityBatchPrompt", () => {
   })
 
   it("includes the source filename in the frontmatter sources requirement", () => {
-    const prompt = buildEntityBatchPrompt("", "", "", "my-paper.pdf", SAMPLE_BATCH)
+    const prompt = buildEntityBatchPrompt("", "", [], "my-paper.pdf", SAMPLE_BATCH)
     expect(prompt).toContain("my-paper.pdf")
   })
 
   it("handles an entity-only batch (concept list shows '(none in this batch)')", () => {
-    const prompt = buildEntityBatchPrompt("", "", "", "src.pdf", [
+    const prompt = buildEntityBatchPrompt("", "", [], "src.pdf", [
       { name: "Alpha Corp", type: "entity" },
     ])
     expect(prompt).toContain("- Alpha Corp")
@@ -131,8 +133,36 @@ describe("buildEntityBatchPrompt", () => {
 
   it("respects the user's output language setting", () => {
     useWikiStore.getState().setOutputLanguage("Chinese")
-    const prompt = buildEntityBatchPrompt("", "", "", "src.pdf", SAMPLE_BATCH)
+    const prompt = buildEntityBatchPrompt("", "", [], "src.pdf", SAMPLE_BATCH)
     expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: Chinese")
+  })
+
+  it("renders a valid_wikilink_targets block when targets are provided", () => {
+    const prompt = buildEntityBatchPrompt(
+      "",
+      "",
+      ["attention-mechanism", "bert"],
+      "src.pdf",
+      SAMPLE_BATCH,
+    )
+    expect(prompt).toContain("<valid_wikilink_targets>")
+    expect(prompt).toContain("attention-mechanism")
+    expect(prompt).toContain("bert")
+    expect(prompt).toContain("Do NOT invent slugs outside this list.")
+    expect(prompt).not.toContain("## Current Wiki Index")
+  })
+
+  it("omits the wikilink targets block when list is empty", () => {
+    const prompt = buildEntityBatchPrompt("", "", [], "src.pdf", SAMPLE_BATCH)
+    expect(prompt).not.toContain("<valid_wikilink_targets>")
+    expect(prompt).not.toContain("## Current Wiki Index")
+  })
+
+  it("catchup mode stresses that first-pass pages were missing on disk", () => {
+    const prompt = buildEntityBatchPrompt("", "", [], "src.pdf", SAMPLE_BATCH, "", "catchup")
+    expect(prompt).toContain("CATCH-UP PASS")
+    expect(prompt).toContain("NOT written to disk in the first batch pass")
+    expect(prompt).toContain("no omissions, no stubs")
   })
 })
 

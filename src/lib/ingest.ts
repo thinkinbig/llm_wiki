@@ -6,9 +6,18 @@ import { useChatStore } from "@/stores/chat-store"
 import { useActivityStore } from "@/stores/activity-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, normalizePath } from "@/lib/path-utils"
+import type { FileNode } from "@/types/wiki"
+import { makeQuerySlug } from "@/lib/wiki-filename"
 import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
 import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
 import { mergePageContent, type MergeFn } from "@/lib/page-merge"
+import { ensureSourcesInContent } from "@/lib/sources-merge"
+import { postLinkIngestedPages } from "@/lib/post-ingest-wikilinks"
+import {
+  findCatchupManifestEntities,
+  isManifestStubContent,
+  materializeManifestPages,
+} from "@/lib/post-ingest-materialize"
 import { withProjectLock } from "@/lib/project-mutex"
 import {
   extractAndSaveSourceImages,
@@ -16,6 +25,11 @@ import {
 } from "@/lib/extract-source-images"
 import { captionMarkdownImages, loadCaptionCache } from "@/lib/image-caption-pipeline"
 import type { MultimodalConfig } from "@/stores/wiki-store"
+import {
+  buildAnalysisPrompt,
+  parseAnalysisOutput,
+  type AnalysisEntity,
+} from "@/lib/analysis"
 
 /**
  * Resolve the LLM config that the caption pipeline should use.
@@ -289,10 +303,15 @@ const INGEST_GENERATION_RESPONSE_RESERVE = 32_000
 const INGEST_MIN_CHUNK_CHARS = 10_000
 const INGEST_CHUNK_OVERLAP_CHARS = 500
 // Number of entity/concept pages requested per batched Generation call.
-// 20 pages × ~600 chars each ≈ 12k chars output, well inside the 8192
-// max_tokens (~32k chars) reserve. Larger batches force the model to
+// 20 pages × ~600 chars each ≈ 12k chars output, well inside the 4096
+// max_tokens (~16k chars) reserve. Larger batches force the model to
 // write thinner pages; smaller batches multiply LLM round-trips.
 const INGEST_ENTITY_BATCH_SIZE = 20
+// Catch-up pass: smaller batches after primary writes to recover manifest
+// pages the model omitted from the first pass.
+const INGEST_CATCHUP_BATCH_SIZE = 5
+// Maximum slug candidates surfaced to the model per entity batch.
+const WIKILINK_CANDIDATE_LIMIT = 30
 
 /** Max source-content length a single Analysis call can consume. Longer
  *  documents are split into N chunks, each analyzed independently.
@@ -320,23 +339,393 @@ export function computeGenerationContentBudget(maxContextSize: number | undefine
   )
 }
 
-// Analysis types, parser, and prompt builder live in `./analysis`.
-// We re-export `AnalysisEntity` so existing imports from this file still
-// resolve. `ChunkedEntity` is the local pipeline shape — same as
-// `AnalysisEntity` plus a required `chunkIndex` so each entity remembers
-// which source chunk it came from (drives `analysisParts[i]` selection
-// when building batch context).
-import {
-  type AnalysisEntity,
-  type AnalysisPart,
-  parseAnalysisOutput,
-  buildAnalysisPrompt,
-} from "./analysis"
+interface IngestRunContext {
+  projectPath: string
+  sourcePath: string
+  fileName: string
+  llmConfig: LlmConfig
+  signal?: AbortSignal
+  folderContext?: string
+  wiki: {
+    schema: string
+    purpose: string
+    index: string
+    overview: string
+  }
+  source: {
+    raw: string
+    enriched: string
+  }
+}
 
-export type { AnalysisEntity }
-export { buildAnalysisPrompt }
+interface IngestWriteContext {
+  projectPath: string
+  llmConfig: LlmConfig
+  sourceFileName: string
+  signal?: AbortSignal
+}
 
-type ChunkedEntity = AnalysisEntity & { chunkIndices: number[] }
+function buildEntityBatchPromptForRun(
+  runCtx: IngestRunContext,
+  wikilinkTargets: string[],
+  batch: AnalysisEntity[],
+  mode: "primary" | "catchup" = "primary",
+): string {
+  return buildEntityBatchPrompt(
+    runCtx.wiki.schema,
+    runCtx.wiki.purpose,
+    wikilinkTargets,
+    runCtx.fileName,
+    batch,
+    runCtx.source.enriched,
+    mode,
+  )
+}
+
+function buildGenerationPromptForRun(
+  runCtx: IngestRunContext,
+  indexForGeneration: string,
+  sourceForGeneration: string,
+  skipContentPages: boolean,
+): string {
+  return buildGenerationPrompt(
+    runCtx.wiki.schema,
+    runCtx.wiki.purpose,
+    indexForGeneration,
+    runCtx.fileName,
+    runCtx.wiki.overview,
+    sourceForGeneration,
+    skipContentPages,
+  )
+}
+
+interface ChunkedAnalysisResult {
+  analysis: string
+  chunkCount: number
+  isMultiChunk: boolean
+}
+
+async function runChunkedAnalysis(
+  runCtx: IngestRunContext,
+  activityId: string,
+): Promise<ChunkedAnalysisResult> {
+  const analysisChunkSize = computeAnalysisChunkSize(runCtx.llmConfig.maxContextSize)
+  const contentChunks = chunkForAnalysis(
+    runCtx.source.enriched,
+    analysisChunkSize,
+    INGEST_CHUNK_OVERLAP_CHARS,
+  )
+  const isMultiChunk = contentChunks.length > 1
+  if (isMultiChunk) {
+    console.log(
+      `[ingest] "${runCtx.fileName}": ${runCtx.source.enriched.length} chars > ${analysisChunkSize} chunk size → ${contentChunks.length} analysis passes`,
+    )
+  }
+
+  // ── Step 1: Analysis (one pass per chunk) ────────────────────
+  // Each chunk gets its own structured analysis. We concatenate the
+  // outputs with a header line per part so Generation can tell which
+  // section of the document each analysis covers.
+  const analysisParts: string[] = []
+  const stride = Math.max(1, analysisChunkSize - INGEST_CHUNK_OVERLAP_CHARS)
+
+  for (let i = 0; i < contentChunks.length; i++) {
+    const chunkContent = contentChunks[i]
+    const chunkLabel = isMultiChunk ? ` (part ${i + 1}/${contentChunks.length})` : ""
+    useActivityStore.getState().updateItem(activityId, { detail: `Step 1/2: Analyzing source...${chunkLabel}` })
+
+    let chunkAnalysis = ""
+
+    await streamChat(
+      runCtx.llmConfig,
+      [
+        { role: "system", content: buildAnalysisPrompt(runCtx.wiki.purpose, runCtx.wiki.index, chunkContent) },
+        {
+          role: "user",
+          content: `Analyze this source document${chunkLabel}:\n\n**File:** ${runCtx.fileName}${runCtx.folderContext ? `\n**Folder context:** ${runCtx.folderContext}` : ""}\n\n---\n\n${chunkContent}`,
+        },
+      ],
+      {
+        onToken: (token) => { chunkAnalysis += token },
+        onDone: () => {},
+        onError: (err) => {
+          useActivityStore.getState().updateItem(activityId, {
+            status: "error",
+            detail: `Analysis failed${chunkLabel}: ${err.message}`,
+          })
+        },
+      },
+      runCtx.signal,
+      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 8192 },
+    )
+
+    const stepActivity = useActivityStore.getState().items.find((it) => it.id === activityId)
+    if (stepActivity?.status === "error") {
+      throw new Error(stepActivity.detail || "Analysis stream failed")
+    }
+
+    if (isMultiChunk) {
+      const startChar = i * stride
+      const endChar = Math.min(startChar + analysisChunkSize, runCtx.source.enriched.length)
+      analysisParts.push(
+        `## Stage 1 Analysis — Part ${i + 1}/${contentChunks.length} (chars ${startChar}–${endChar})\n\n${chunkAnalysis}`,
+      )
+    } else {
+      analysisParts.push(chunkAnalysis)
+    }
+  }
+
+  return {
+    analysis: analysisParts.join("\n\n"),
+    chunkCount: contentChunks.length,
+    isMultiChunk,
+  }
+}
+
+interface BatchedEntityGenerationResult {
+  useBatchedGeneration: boolean
+  batchWrittenPaths: string[]
+  batchWarnings: string[]
+  batchHardFailures: string[]
+  contentPagesForPostPass: string[]
+}
+
+async function runBatchedEntityGeneration(
+  runCtx: IngestRunContext,
+  activityId: string,
+  analysis: string,
+): Promise<BatchedEntityGenerationResult> {
+  const analysisParsed = parseAnalysisOutput(analysis, 0)
+  const parsedEntities = analysisParsed.manifestFound ? analysisParsed.entities : null
+  const useBatchedGeneration = parsedEntities !== null && parsedEntities.length > 0
+  const batchWrittenPaths: string[] = []
+  const batchWarnings: string[] = []
+  const batchHardFailures: string[] = []
+
+  if (useBatchedGeneration) {
+    const batches = dedupAndBatchEntities(parsedEntities!, INGEST_ENTITY_BATCH_SIZE)
+    console.log(
+      `[ingest] "${runCtx.fileName}": manifest has ${parsedEntities!.length} entities/concepts → ${batches.length} batch call(s) of ≤${INGEST_ENTITY_BATCH_SIZE}`,
+    )
+
+    for (let bi = 0; bi < batches.length; bi++) {
+      const batch = batches[bi]
+      useActivityStore.getState().updateItem(activityId, {
+        detail: `Step 2a/2b: Writing entity batch ${bi + 1}/${batches.length} (${batch.length} pages)...`,
+      })
+
+      // Pre-filter wikilink targets (≤30) so the model attends to every slug.
+      // Re-scans wiki/ each batch so pages from earlier batches are included.
+      const wikilinkTargets = await buildWikilinkCandidates(runCtx.projectPath, parsedEntities!, batch)
+
+      let batchOutput = ""
+      await streamChat(
+        runCtx.llmConfig,
+        [
+          {
+            role: "system",
+            content: buildEntityBatchPromptForRun(runCtx, wikilinkTargets, batch),
+          },
+          {
+            role: "user",
+            content: [
+              `Source document: **${runCtx.fileName}**`,
+              "",
+              `Write entity/concept pages for this batch ONLY (batch ${bi + 1} of ${batches.length}). The system prompt lists the exact names to cover.`,
+              "",
+              "## Stage 1 Analysis (use as context for page content — do not echo)",
+              "",
+              analysis,
+              "",
+              "---",
+              "",
+              "Emit FILE blocks for the listed pages now. Begin with `---FILE:`.",
+            ].join("\n"),
+          },
+        ],
+        {
+          onToken: (token) => { batchOutput += token },
+          onDone: () => {},
+          onError: (err) => {
+            useActivityStore.getState().updateItem(activityId, {
+              status: "error",
+              detail: `Entity batch ${bi + 1}/${batches.length} failed: ${err.message}`,
+            })
+          },
+        },
+        runCtx.signal,
+        { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 8192 },
+      )
+
+      const batchActivity = useActivityStore.getState().items.find((it) => it.id === activityId)
+      if (batchActivity?.status === "error") {
+        throw new Error(batchActivity.detail || "Entity batch stream failed")
+      }
+
+      const result = await writeFileBlocks(
+        {
+          projectPath: runCtx.projectPath,
+          llmConfig: runCtx.llmConfig,
+          sourceFileName: runCtx.fileName,
+          signal: runCtx.signal,
+        },
+        batchOutput,
+      )
+      batchWrittenPaths.push(...result.writtenPaths)
+      batchWarnings.push(...result.warnings)
+      batchHardFailures.push(...result.hardFailures)
+    }
+
+  } else if (parsedEntities === null) {
+    console.warn(
+      `[ingest] "${runCtx.fileName}": entity manifest missing or unparseable — falling back to legacy single-call Generation. Entity coverage may be incomplete for long documents.`,
+    )
+  }
+
+  let contentPagesForPostPass = useBatchedGeneration
+    ? batchWrittenPaths.filter(
+        (p) => p.startsWith("wiki/entities/") || p.startsWith("wiki/concepts/"),
+      )
+    : []
+
+  // Manifest materialization: stub any analysis-listed entity/concept
+  // the batched LLM calls failed to emit, and queue missing-page reviews
+  // for dangling `related:` refs outside the manifest.
+  if (useBatchedGeneration && parsedEntities && parsedEntities.length > 0) {
+    useActivityStore.getState().updateItem(activityId, {
+      detail: "Step 2a.4/2b: Materializing manifest pages...",
+    })
+    const materialize = await materializeManifestPages(
+      runCtx.projectPath,
+      parsedEntities,
+      runCtx.fileName,
+      contentPagesForPostPass,
+      runCtx.sourcePath,
+    )
+    if (materialize.stubPaths.length > 0) {
+      batchWrittenPaths.push(...materialize.stubPaths)
+      console.log(
+        `[ingest] "${runCtx.fileName}": materialized ${materialize.stubPaths.length} manifest stub page(s)`,
+      )
+    }
+    if (materialize.reviewItems.length > 0) {
+      useReviewStore.getState().addItems(materialize.reviewItems)
+      console.log(
+        `[ingest] "${runCtx.fileName}": queued ${materialize.reviewItems.length} missing-page review(s) for non-manifest related refs`,
+      )
+    }
+
+    // Catch-up runs AFTER materialization so stub pages exist on disk and
+    // findCatchupManifestEntities can target them for a full LLM rewrite.
+    const catchupTargets = await findCatchupManifestEntities(runCtx.projectPath, parsedEntities!)
+    if (catchupTargets.length > 0) {
+      const catchupBatches = dedupAndBatchEntities(catchupTargets, INGEST_CATCHUP_BATCH_SIZE)
+      console.log(
+        `[ingest] "${runCtx.fileName}": ${catchupTargets.length} manifest page(s) need catch-up after materialization → ${catchupBatches.length} catch-up batch(es) of ≤${INGEST_CATCHUP_BATCH_SIZE}`,
+      )
+      for (let ci = 0; ci < catchupBatches.length; ci++) {
+        const batch = catchupBatches[ci]
+        useActivityStore.getState().updateItem(activityId, {
+          detail: `Step 2a-catchup: Missed entities ${ci + 1}/${catchupBatches.length} (${batch.length} pages)...`,
+        })
+        const wikilinkTargets = await buildWikilinkCandidates(runCtx.projectPath, parsedEntities!, batch)
+
+        let batchOutput = ""
+        await streamChat(
+          runCtx.llmConfig,
+          [
+            {
+              role: "system",
+              content: buildEntityBatchPromptForRun(
+                runCtx,
+                wikilinkTargets,
+                batch,
+                "catchup",
+              ),
+            },
+            {
+              role: "user",
+              content: [
+                `Source document: **${runCtx.fileName}**`,
+                "",
+                `CATCH-UP batch ${ci + 1} of ${catchupBatches.length}: these manifest entries are missing or still stub pages. Emit a complete FILE block for every name listed in the system prompt — no omissions.`,
+                "",
+                "## Stage 1 Analysis (use as context for page content — do not echo)",
+                "",
+                analysis,
+                "",
+                "---",
+                "",
+                "Emit FILE blocks for the listed pages now. Begin with `---FILE:`.",
+              ].join("\n"),
+            },
+          ],
+          {
+            onToken: (token) => { batchOutput += token },
+            onDone: () => {},
+            onError: (err) => {
+              useActivityStore.getState().updateItem(activityId, {
+                status: "error",
+                detail: `Catch-up batch ${ci + 1}/${catchupBatches.length} failed: ${err.message}`,
+              })
+            },
+          },
+          runCtx.signal,
+          { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 8192 },
+        )
+
+        const catchupActivity = useActivityStore.getState().items.find((it) => it.id === activityId)
+        if (catchupActivity?.status === "error") {
+          throw new Error(catchupActivity.detail || "Catch-up batch stream failed")
+        }
+
+        const result = await writeFileBlocks(
+          {
+            projectPath: runCtx.projectPath,
+            llmConfig: runCtx.llmConfig,
+            sourceFileName: runCtx.fileName,
+            signal: runCtx.signal,
+          },
+          batchOutput,
+          { mergeExisting: false },
+        )
+        batchWrittenPaths.push(...result.writtenPaths)
+        batchWarnings.push(...result.warnings)
+        batchHardFailures.push(...result.hardFailures)
+      }
+    }
+  }
+
+  // Include every entity/concept path touched this run (batch, stub, catch-up).
+  contentPagesForPostPass = useBatchedGeneration
+    ? batchWrittenPaths.filter(
+        (p) => p.startsWith("wiki/entities/") || p.startsWith("wiki/concepts/"),
+      )
+    : []
+
+  // After all entity/concept pages are on disk, run a deterministic
+  // post-pass to add missing wikilinks (no LLM call). This specifically
+  // fills cross-links that fell outside the per-batch top-N prompt list.
+  if (contentPagesForPostPass.length > 0) {
+    useActivityStore.getState().updateItem(activityId, {
+      detail: "Step 2a.5/2b: Post-linking generated pages...",
+    })
+    const postLink = await postLinkIngestedPages(runCtx.projectPath, contentPagesForPostPass)
+    if (postLink.totalAdded > 0) {
+      console.log(
+        `[ingest] "${runCtx.fileName}": post-pass added ${postLink.totalAdded} wikilinks across ${postLink.updatedPaths.length} page(s)`,
+      )
+    }
+  }
+
+  return {
+    useBatchedGeneration,
+    batchWrittenPaths,
+    batchWarnings,
+    batchHardFailures,
+    contentPagesForPostPass,
+  }
+}
 
 /** Deduplicate by case-insensitive name (first occurrence wins for
  *  casing) and split into batches of `batchSize`. Used to feed the
@@ -432,6 +821,16 @@ async function autoIngestImpl(
     tryReadFile(`${pp}/wiki/index.md`),
     tryReadFile(`${pp}/wiki/overview.md`),
   ])
+  const runCtx: IngestRunContext = {
+    projectPath: pp,
+    sourcePath: sp,
+    fileName,
+    llmConfig,
+    signal,
+    folderContext,
+    wiki: { schema, purpose, index, overview },
+    source: { raw: sourceContent, enriched: sourceContent },
+  }
 
   // ── Cache check: skip re-ingest if source content hasn't changed ──
   //
@@ -637,216 +1036,23 @@ async function autoIngestImpl(
       // captioning failure must NEVER break ingest.
     }
   }
+  runCtx.source.enriched = enrichedSourceContent
 
-  // ── Content chunking ─────────────────────────────────────────
-  //
-  // Long documents (PDFs, papers, books) used to be silently truncated
-  // to a hard-coded 50,000 chars before either LLM call ever saw them
-  // — so an 80-page paper would only ever ingest its first ~25 pages.
-  // We now derive a per-call budget from the model's actual context
-  // size and feed Analysis one chunk at a time. Generation still runs
-  // once, with the merged analyses; its source excerpt shrinks
-  // dynamically so the whole prompt stays inside the context window.
-  //
-  // This is a pragmatic stopgap. The Phase 3 chunk-citation pipeline
-  // (modelled on WeKnora) will replace it with per-slug verbatim chunk
-  // quoting; that work is out of scope here.
-  const analysisChunkSize = computeAnalysisChunkSize(llmConfig.maxContextSize)
-  const contentChunks = chunkForAnalysis(
-    enrichedSourceContent,
-    analysisChunkSize,
-    INGEST_CHUNK_OVERLAP_CHARS,
+  // ── Content chunking + Step 1 Analysis ───────────────────────
+  // Long documents are analyzed in chunks; helper returns merged
+  // analysis plus chunk metadata used in the generation prompt.
+  const { analysis, chunkCount, isMultiChunk } = await runChunkedAnalysis(
+    runCtx,
+    activityId,
   )
-  const isMultiChunk = contentChunks.length > 1
-  if (isMultiChunk) {
-    console.log(
-      `[ingest] "${fileName}": ${enrichedSourceContent.length} chars > ${analysisChunkSize} chunk size → ${contentChunks.length} analysis passes`,
-    )
-  }
 
-  // ── Step 1: Analysis (one pass per chunk) ────────────────────
-  // Each chunk gets its own structured analysis. parseAnalysisOutput
-  // returns a typed AnalysisPart with `.entities` (parsed manifest) and
-  // `.prose` (manifest stripped). Downstream consumers always work with
-  // the typed fields, never the raw LLM text.
-  const parts: AnalysisPart[] = []
-  const stride = Math.max(1, analysisChunkSize - INGEST_CHUNK_OVERLAP_CHARS)
-
-  for (let i = 0; i < contentChunks.length; i++) {
-    const chunkContent = contentChunks[i]
-    const chunkLabel = isMultiChunk ? ` (part ${i + 1}/${contentChunks.length})` : ""
-    activity.updateItem(activityId, { detail: `Step 1/2: Analyzing source...${chunkLabel}` })
-
-    let chunkAnalysis = ""
-
-    await streamChat(
-      llmConfig,
-      [
-        { role: "system", content: buildAnalysisPrompt(purpose, index, chunkContent) },
-        {
-          role: "user",
-          content: `Analyze this source document${chunkLabel}:\n\n**File:** ${fileName}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${chunkContent}`,
-        },
-      ],
-      {
-        onToken: (token) => { chunkAnalysis += token },
-        onDone: () => {},
-        onError: (err) => {
-          activity.updateItem(activityId, { status: "error", detail: `Analysis failed${chunkLabel}: ${err.message}` })
-        },
-      },
-      signal,
-      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 8192 },
-    )
-
-    const stepActivity = useActivityStore.getState().items.find((it) => it.id === activityId)
-    if (stepActivity?.status === "error") {
-      throw new Error(stepActivity.detail || "Analysis stream failed")
-    }
-
-    parts.push(parseAnalysisOutput(chunkAnalysis, i))
-  }
-
-  // Format prose for one part with the multi-chunk header (helps the
-  // downstream LLM identify which range of the source this part covers).
-  // For single-chunk documents the header would be noise, so skip it.
-  const formatPartProse = (part: AnalysisPart): string => {
-    if (!isMultiChunk) return part.prose
-    const startChar = part.chunkIndex * stride
-    const endChar = Math.min(startChar + analysisChunkSize, enrichedSourceContent.length)
-    return `## Stage 1 Analysis — Part ${part.chunkIndex + 1}/${contentChunks.length} (chars ${startChar}–${endChar})\n\n${part.prose}`
-  }
-
-  const analysis = parts.map(formatPartProse).join("\n\n")
-
-  // ── Step 1.5: Batched entity/concept generation ───────────────
-  //
-  // Long documents have far more entities than a single Generation
-  // call's response budget (~8192 tokens) can cover — the model
-  // silently drops most of them. So we use the per-chunk entity
-  // attribution recorded in `parts` to dispatch dedicated LLM calls
-  // (one per batch of ~20 names), each given only the prose context
-  // for the chunks its entities came from — GraphRAG-style per-text-unit
-  // attribution. Each batch writes its FILE blocks directly to disk,
-  // and the subsequent global Generation call (Step 2) only has to
-  // produce source-summary / index / log / overview.
-  //
-  // Fallback path: if NO part has a parseable manifest, we skip batching
-  // and let the legacy single-call Generation run instead. Tolerates
-  // model prompt-compliance drift without breaking the pipeline.
-  const anyManifest = parts.some(p => p.manifestFound)
-  const failedChunks = parts.filter(p => !p.manifestFound)
-  if (anyManifest && failedChunks.length > 0) {
-    console.warn(
-      `[ingest] "${fileName}": ${failedChunks.length}/${parts.length} chunk(s) produced no parseable entity manifest (chunks ${failedChunks.map(p => p.chunkIndex + 1).join(", ")}). Entities from those chunks are excluded from batched generation.`,
-    )
-  }
-  // Merge all chunk indices for the same entity so batch context spans every
-  // chunk that mentions it, not just the first. First-occurrence name casing wins.
-  const entityByName = new Map<string, ChunkedEntity>()
-  for (const part of parts) {
-    for (const e of part.entities) {
-      const key = e.name.toLowerCase()
-      const existing = entityByName.get(key)
-      if (existing) {
-        if (!existing.chunkIndices.includes(part.chunkIndex)) {
-          existing.chunkIndices.push(part.chunkIndex)
-        }
-      } else {
-        entityByName.set(key, { ...e, chunkIndices: [part.chunkIndex] })
-      }
-    }
-  }
-  const chunkedEntities: ChunkedEntity[] = [...entityByName.values()]
-  const parsedEntities = anyManifest ? chunkedEntities : null
-  const useBatchedGeneration = parsedEntities !== null && parsedEntities.length > 0
-  const batchWrittenPaths: string[] = []
-  const batchWarnings: string[] = []
-  const batchHardFailures: string[] = []
-
-  if (useBatchedGeneration) {
-    const batches = dedupAndBatchEntities(parsedEntities!, INGEST_ENTITY_BATCH_SIZE)
-    console.log(
-      `[ingest] "${fileName}": manifest has ${parsedEntities!.length} entities/concepts → ${batches.length} batch call(s) of ≤${INGEST_ENTITY_BATCH_SIZE}`,
-    )
-
-    // Re-read the index between batches so later batches see pages
-    // written by earlier batches and can wikilink to them.
-    let runningIndex = index
-    for (let bi = 0; bi < batches.length; bi++) {
-      const batch = batches[bi]
-      activity.updateItem(activityId, {
-        detail: `Step 2a/2b: Writing entity batch ${bi + 1}/${batches.length} (${batch.length} pages)...`,
-      })
-
-      // Only pass the analysis parts that cover the chunks where this
-      // batch's entities were found. `parts[i].prose` is already
-      // manifest-stripped by parseAnalysisOutput — the typed contract
-      // makes it impossible to accidentally leak the ENTITIES block back
-      // into the model's context.
-      const batchPartIndices = [...new Set(batch.flatMap(e => e.chunkIndices))]
-      const batchContext = batchPartIndices
-        .map(i => formatPartProse(parts[i]))
-        .join("\n\n---\n\n")
-
-      let batchOutput = ""
-      await streamChat(
-        llmConfig,
-        [
-          {
-            role: "system",
-            content: buildEntityBatchPrompt(schema, purpose, runningIndex, fileName, batch, enrichedSourceContent),
-          },
-          {
-            role: "user",
-            content: [
-              `Source document: **${fileName}** (batch ${bi + 1} of ${batches.length}).`,
-              "",
-              "<context>",
-              "Use this analysis as background for writing the listed pages. Do not echo it.",
-              "",
-              batchContext,
-              "</context>",
-              "",
-              "Emit the FILE blocks now per `<output_contract>`. Begin with `---FILE:`.",
-            ].join("\n"),
-          },
-        ],
-        {
-          onToken: (token) => { batchOutput += token },
-          onDone: () => {},
-          onError: (err) => {
-            activity.updateItem(activityId, {
-              status: "error",
-              detail: `Entity batch ${bi + 1}/${batches.length} failed: ${err.message}`,
-            })
-          },
-        },
-        signal,
-        { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 8192 },
-      )
-
-      const batchActivity = useActivityStore.getState().items.find((it) => it.id === activityId)
-      if (batchActivity?.status === "error") {
-        throw new Error(batchActivity.detail || "Entity batch stream failed")
-      }
-
-      const result = await writeFileBlocks(pp, batchOutput, llmConfig, fileName, signal)
-      batchWrittenPaths.push(...result.writtenPaths)
-      batchWarnings.push(...result.warnings)
-      batchHardFailures.push(...result.hardFailures)
-
-      // Refresh the index snapshot for the next batch. We deliberately
-      // re-read from disk (not just append to the in-memory string) so
-      // that if Step 2's index regeneration ever runs interleaved with
-      // batches in the future, we'd still see the on-disk truth.
-      runningIndex = await tryReadFile(`${pp}/wiki/index.md`)
-    }
-  } else if (parsedEntities === null) {
-    console.warn(
-      `[ingest] "${fileName}": entity manifest missing or unparseable — falling back to legacy single-call Generation. Entity coverage may be incomplete for long documents.`,
-    )
-  }
+  const {
+    useBatchedGeneration,
+    batchWrittenPaths,
+    batchWarnings,
+    batchHardFailures,
+    contentPagesForPostPass,
+  } = await runBatchedEntityGeneration(runCtx, activityId, analysis)
 
   // ── Step 2: Generation ────────────────────────────────────────
   // LLM takes the merged analysis + a source excerpt and produces
@@ -861,12 +1067,12 @@ async function autoIngestImpl(
       : "Step 2/2: Generating wiki pages...",
   })
 
-  const generationBudget = computeGenerationContentBudget(llmConfig.maxContextSize)
+  const generationBudget = computeGenerationContentBudget(runCtx.llmConfig.maxContextSize)
   const sourceBudgetForGen = Math.max(5_000, generationBudget - analysis.length)
-  const sourceForGeneration = enrichedSourceContent.length > sourceBudgetForGen
-    ? enrichedSourceContent.slice(0, sourceBudgetForGen) +
+  const sourceForGeneration = runCtx.source.enriched.length > sourceBudgetForGen
+    ? runCtx.source.enriched.slice(0, sourceBudgetForGen) +
       "\n\n[...truncated for generation; full content covered by multi-part analysis above...]"
-    : enrichedSourceContent
+    : runCtx.source.enriched
 
   // When batching ran, surface the freshly-written pages to the LLM so
   // it can include them in the rebuilt index.md. Without this list the
@@ -874,26 +1080,18 @@ async function autoIngestImpl(
   // ignores everything the batches just wrote.
   const indexForGen = useBatchedGeneration
     ? await tryReadFile(`${pp}/wiki/index.md`)
-    : index
-  const newlyWrittenContentPages = useBatchedGeneration
-    ? batchWrittenPaths.filter(
-        (p) => p.startsWith("wiki/entities/") || p.startsWith("wiki/concepts/"),
-      )
-    : []
+    : runCtx.wiki.index
 
   let generation = ""
 
   await streamChat(
-    llmConfig,
+    runCtx.llmConfig,
     [
       {
         role: "system",
-        content: buildGenerationPrompt(
-          schema,
-          purpose,
+        content: buildGenerationPromptForRun(
+          runCtx,
           indexForGen,
-          fileName,
-          overview,
           sourceForGeneration,
           useBatchedGeneration, // skipContentPages
         ),
@@ -901,10 +1099,10 @@ async function autoIngestImpl(
       {
         role: "user",
         content: [
-          `Source document to process: **${fileName}**`,
+          `Source document to process: **${runCtx.fileName}**`,
           "",
           isMultiChunk
-            ? `The Stage 1 analysis below was produced in ${contentChunks.length} passes (one per content chunk). Each part covers a different range of the original document — synthesize across ALL parts when generating wiki pages.`
+            ? `The Stage 1 analysis below was produced in ${chunkCount} passes (one per content chunk). Each part covers a different range of the original document — synthesize across ALL parts when generating wiki pages.`
             : "The Stage 1 analysis below is CONTEXT to inform your output. Do NOT echo its tables, bullet points, or prose. Your output must be FILE/REVIEW blocks as specified in the system prompt — nothing else.",
           "",
           isMultiChunk
@@ -913,23 +1111,23 @@ async function autoIngestImpl(
           "",
           analysis,
           "",
-          enrichedSourceContent.length > sourceForGeneration.length
+          runCtx.source.enriched.length > sourceForGeneration.length
             ? "## Source Content (excerpt — full content already covered by the multi-part analysis above)"
             : "## Original Source Content",
           "",
           sourceForGeneration,
           "",
-          ...(newlyWrittenContentPages.length > 0
+          ...(contentPagesForPostPass.length > 0
             ? [
                 "## Already-written entity/concept pages (include these in your index.md update)",
                 "",
-                ...newlyWrittenContentPages.map((p) => `- ${p}`),
+                ...contentPagesForPostPass.map((p) => `- ${p}`),
                 "",
               ]
             : []),
           "---",
           "",
-          `Now emit the FILE blocks for the wiki files derived from **${fileName}**.`,
+          `Now emit the FILE blocks for the wiki files derived from **${runCtx.fileName}**.`,
           "Your response MUST begin with `---FILE:` as the very first characters.",
           "No preamble. No analysis prose. Start immediately.",
         ].join("\n"),
@@ -942,7 +1140,7 @@ async function autoIngestImpl(
         activity.updateItem(activityId, { status: "error", detail: `Generation failed: ${err.message}` })
       },
     },
-    signal,
+    runCtx.signal,
     { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 8192 },
   )
 
@@ -954,11 +1152,13 @@ async function autoIngestImpl(
   // ── Step 3: Write files ───────────────────────────────────────
   activity.updateItem(activityId, { detail: "Writing files..." })
   const { writtenPaths: globalWritten, warnings: globalWarnings, hardFailures: globalHardFailures } = await writeFileBlocks(
-    pp,
+    {
+      projectPath: runCtx.projectPath,
+      llmConfig: runCtx.llmConfig,
+      sourceFileName: runCtx.fileName,
+      signal: runCtx.signal,
+    },
     generation,
-    llmConfig,
-    fileName,
-    signal,
   )
   // Merge the batched writes into the final result set so cache,
   // activity panel, embeddings, and file-tree refresh all see one
@@ -995,15 +1195,15 @@ async function autoIngestImpl(
     const fallbackContent = [
       "---",
       `type: source`,
-      `title: "Source: ${fileName}"`,
+      `title: "Source: ${runCtx.fileName}"`,
       `created: ${date}`,
       `updated: ${date}`,
-      `sources: ["${fileName}"]`,
+      `sources: ["${runCtx.fileName}"]`,
       `tags: []`,
       `related: []`,
       "---",
       "",
-      `# Source: ${fileName}`,
+      `# Source: ${runCtx.fileName}`,
       "",
       analysis ? analysis.slice(0, 3000) : "(Analysis not available)",
       "",
@@ -1127,13 +1327,17 @@ function contentMatchesTargetLanguage(content: string, target: string): boolean 
   return !detectedIsCjk
 }
 
+interface WriteFileBlocksOptions {
+  /** When false, existing entity/concept pages are overwritten wholesale (catch-up pass). */
+  mergeExisting?: boolean
+}
+
 async function writeFileBlocks(
-  projectPath: string,
+  ctx: IngestWriteContext,
   text: string,
-  llmConfig: LlmConfig,
-  sourceFileName: string,
-  signal?: AbortSignal,
+  options: WriteFileBlocksOptions = {},
 ): Promise<{ writtenPaths: string[]; warnings: string[]; hardFailures: string[] }> {
+  const mergeExisting = options.mergeExisting !== false
   const { blocks, warnings: parseWarnings } = parseFileBlocks(text)
   const warnings = [...parseWarnings]
   const writtenPaths: string[] = []
@@ -1158,7 +1362,7 @@ async function writeFileBlocks(
     // step ~45% of generated entity pages went to disk with
     // unparseable frontmatter and the read-time fallback had to
     // paper over it forever.
-    const content = sanitizeIngestedFileContent(rawContent)
+    let content = sanitizeIngestedFileContent(rawContent)
 
     // Language guard: reject individual FILE blocks whose body contradicts
     // the user-set target language. Skip:
@@ -1173,6 +1377,8 @@ async function writeFileBlocks(
     const isEntityOrSource =
       relativePath.startsWith("wiki/entities/") ||
       relativePath.includes("/entities/") ||
+      relativePath.startsWith("wiki/concepts/") ||
+      relativePath.includes("/concepts/") ||
       relativePath.startsWith("wiki/sources/") ||
       relativePath.includes("/sources/")
     if (
@@ -1188,7 +1394,7 @@ async function writeFileBlocks(
       continue
     }
 
-    const fullPath = `${projectPath}/${relativePath}`
+    const fullPath = `${ctx.projectPath}/${relativePath}`
     try {
       if (relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")) {
         const existing = await tryReadFile(fullPath)
@@ -1206,6 +1412,18 @@ async function writeFileBlocks(
         // content pages).
         await writeFile(fullPath, content)
       } else {
+        const existing = await tryReadFile(fullPath)
+        // Grill #8A: primary batches merge multi-source pages, but never
+        // merge into a materialization stub — that would block catch-up and
+        // leave stub text in the body. Catch-up uses mergeExisting:false.
+        const overwriteStub = existing !== null && isManifestStubContent(existing)
+        if (!mergeExisting || overwriteStub) {
+          let toWrite = content
+          if (isEntityOrSource) {
+            toWrite = ensureSourcesInContent(toWrite, ctx.sourceFileName)
+          }
+          await writeFile(fullPath, toWrite)
+        } else {
         // Content pages (entities / concepts / queries / synthesis /
         // comparisons / sources summaries): if a page with this
         // path already exists on disk, merge old + new instead of
@@ -1221,19 +1439,22 @@ async function writeFileBlocks(
         // LLM failure / sanity rejection falls back to "incoming
         // body + array-field union" with a best-effort backup.
         // See page-merge.ts.
-        const existing = await tryReadFile(fullPath)
-        const toWrite = await mergePageContent(
+        let toWrite = await mergePageContent(
           content,
           existing || null,
-          buildPageMerger(llmConfig),
+          buildPageMerger(ctx.llmConfig),
           {
-            sourceFileName,
+            sourceFileName: ctx.sourceFileName,
             pagePath: relativePath,
-            signal,
-            backup: (oldContent) => backupExistingPage(projectPath, relativePath, oldContent),
+            signal: ctx.signal,
+            backup: (oldContent) => backupExistingPage(ctx.projectPath, relativePath, oldContent),
           },
         )
+        if (isEntityOrSource) {
+          toWrite = ensureSourcesInContent(toWrite, ctx.sourceFileName)
+        }
         await writeFile(fullPath, toWrite)
+        }
       }
       writtenPaths.push(relativePath)
     } catch (err) {
@@ -1312,8 +1533,89 @@ function parseReviewBlocks(
   return items
 }
 
-// `buildAnalysisPrompt` lives in `./analysis` and is re-exported from
-// this file's import block at the top.
+// ── Wikilink candidate pre-filtering ────────────────────────────────────
+
+const STRUCTURAL_PAGE_IDS = new Set(["index", "log", "overview", "purpose", "schema"])
+
+function collectMdSlugs(nodes: FileNode[]): string[] {
+  const slugs: string[] = []
+  for (const node of nodes) {
+    if (node.is_dir && node.children) slugs.push(...collectMdSlugs(node.children))
+    else if (!node.is_dir && node.name.endsWith(".md")) {
+      const id = node.name.replace(/\.md$/, "")
+      if (!STRUCTURAL_PAGE_IDS.has(id)) slugs.push(id)
+    }
+  }
+  return slugs
+}
+
+/**
+ * Build a pre-filtered list of wiki page slugs relevant to a batch.
+ *
+ * Three signals, merged in priority order:
+ *   1. Source entity slugs — every entity/concept in this ingest
+ *   2. Embedding hits — semantic similarity to batch entity names
+ *   3. Keyword hits — existing slugs whose tokens overlap entity names
+ *
+ * Capped at `WIKILINK_CANDIDATE_LIMIT` so small models attend to every slug.
+ */
+export async function buildWikilinkCandidates(
+  projectPath: string,
+  allSourceEntities: AnalysisEntity[],
+  batchEntities: AnalysisEntity[],
+): Promise<string[]> {
+  const pp = normalizePath(projectPath)
+
+  const sourceEntitySlugs: string[] = []
+  const manifestSlugSeen = new Set<string>()
+  for (const e of allSourceEntities) {
+    const slug = makeQuerySlug(e.name)
+    if (!slug || manifestSlugSeen.has(slug)) continue
+    manifestSlugSeen.add(slug)
+    sourceEntitySlugs.push(slug)
+  }
+
+  let existingSlugs: string[] = []
+  try {
+    const tree = await listDirectory(`${pp}/wiki`)
+    existingSlugs = collectMdSlugs(tree)
+  } catch {
+    // wiki directory doesn't exist yet — first ingest
+  }
+
+  const embeddingHits: string[] = []
+  const embCfg = useWikiStore.getState().embeddingConfig
+  if (embCfg.enabled && embCfg.model && existingSlugs.length > 0) {
+    try {
+      const { searchByEmbedding } = await import("@/lib/embedding")
+      const query = batchEntities.map((e) => e.name).join(", ")
+      const results = await searchByEmbedding(pp, query, embCfg, WIKILINK_CANDIDATE_LIMIT)
+      embeddingHits.push(...results.map((r) => r.id))
+    } catch {
+      // embedding unavailable — keyword/slug signals only
+    }
+  }
+
+  const queryTokens = new Set(
+    batchEntities.flatMap((e) =>
+      e.name.toLowerCase().split(/[\s\-_]+/).filter((t) => t.length > 2),
+    ),
+  )
+  const keywordHits = existingSlugs.filter((slug) =>
+    slug.split("-").some((t) => queryTokens.has(t)),
+  )
+
+  const seen = new Set<string>()
+  const candidates: string[] = []
+  for (const slug of [...sourceEntitySlugs, ...embeddingHits, ...keywordHits]) {
+    if (!seen.has(slug)) {
+      seen.add(slug)
+      candidates.push(slug)
+      if (candidates.length >= WIKILINK_CANDIDATE_LIMIT) break
+    }
+  }
+  return candidates
+}
 
 /**
  * Per-batch entity/concept page generator. Long documents have too many
@@ -1321,113 +1623,144 @@ function parseReviewBlocks(
  * model silently drops most of them. This prompt narrows the LLM's job
  * to a fixed batch of named pages so it can give each one a proper write.
  *
- * Prompt structure uses XML tags for internal sections — `<task>`,
- * `<output_contract>`, `<forbidden>`, `<inputs>`. This makes the
- * instruction-vs-data boundary unambiguous and lets us reference
- * sections by name without scanning prose.
- *
- * Crucially, `<forbidden>` lists page types written by the global
+ * Crucially, this prompt FORBIDS the page types written by the global
  * Generation call (source summary, index, log, overview). Otherwise
  * every batch would clobber index.md with its own partial view.
- *
- * FILE block delimiters stay `---FILE:` / `---END FILE---` rather than
- * XML tags — page content can contain arbitrary markdown including
- * `<file>`-looking strings, and the line-anchored special delimiter is
- * collision-proof against that.
  */
 export function buildEntityBatchPrompt(
   schema: string,
   purpose: string,
-  index: string,
+  wikilinkTargets: string[],
   sourceFileName: string,
   batch: AnalysisEntity[],
   sourceContent: string = "",
+  mode: "primary" | "catchup" = "primary",
 ): string {
   const entityNames = batch.filter((b) => b.type === "entity").map((b) => b.name)
   const conceptNames = batch.filter((b) => b.type === "concept").map((b) => b.name)
   const formatList = (names: string[]) =>
     names.length === 0 ? "(none in this batch)" : names.map((n) => `- ${n}`).join("\n")
 
+  const catchupBanner =
+    mode === "catchup"
+      ? [
+          "## CATCH-UP PASS (CRITICAL)",
+          "",
+          "These entities/concepts were in the analysis manifest but were NOT written to disk in the first batch pass.",
+          "You MUST emit exactly one complete FILE block for EVERY name in the lists below — no omissions, no stubs.",
+          "Do NOT skip any name because you think another batch will cover it.",
+          "",
+        ].join("\n")
+      : ""
+
+  const jobHeading =
+    mode === "catchup"
+      ? "## Your job — write every listed page that is still missing"
+      : "## Your job — and ONLY your job"
+
   return [
-    "<role>",
     "You are a wiki maintainer writing a focused batch of entity and concept pages.",
-    "Do not output chain-of-thought, hidden reasoning, or explanatory preamble.",
-    "</role>",
+    "Do not output chain-of-thought, hidden reasoning, or explanatory preamble. Output ONLY the requested FILE blocks.",
     "",
-    "<task>",
-    "Write exactly one FILE block for each name in `<pages_to_write>`. Nothing more, nothing less.",
-    `Source file: **${sourceFileName}**. Every page's frontmatter \`sources\` field MUST include this filename.`,
-    "</task>",
+    languageRule(sourceContent),
     "",
-    "<pages_to_write>",
-    "Entity pages (path: `wiki/entities/<kebab-case-name>.md`, frontmatter `type: entity`):",
+    `## IMPORTANT: Source File`,
+    `The original source file is: **${sourceFileName}**`,
+    `Every page you write MUST include this filename in its frontmatter \`sources\` field.`,
+    "",
+    catchupBanner,
+    jobHeading,
+    "",
+    "Write exactly one FILE block per item in the lists below. Nothing more, nothing less.",
+    "",
+    "### Entity pages to write (path: `wiki/entities/<kebab-case-name>.md`, type: `entity`)",
     formatList(entityNames),
     "",
-    "Concept pages (path: `wiki/concepts/<kebab-case-name>.md`, frontmatter `type: concept`):",
+    "### Concept pages to write (path: `wiki/concepts/<kebab-case-name>.md`, type: `concept`)",
     formatList(conceptNames),
-    "</pages_to_write>",
     "",
-    "<output_contract>",
-    "Your ENTIRE response is a sequence of FILE blocks and nothing else.",
+    "## What you MUST NOT write",
     "",
-    "FILE block template:",
-    "    ---FILE: wiki/entities/some-entity.md---",
-    "    (complete file content with YAML frontmatter)",
-    "    ---END FILE---",
+    "Other steps of the pipeline handle these — if you emit them, they will be discarded or, worse, overwrite work done elsewhere:",
     "",
-    "Strict rules:",
-    "1. The FIRST character of your response MUST be `-` (the opening of `---FILE:`).",
-    "2. Emit EXACTLY one FILE block per name in `<pages_to_write>` — no extras, no omissions.",
-    "3. No preamble, no commentary, no prose between or after FILE blocks.",
-    "4. Do not echo or restate the analysis provided in `<context>`.",
-    "5. Page body MUST be in the language specified by `<language_rule>`.",
-    "",
-    "If you start with anything other than `---FILE:`, the entire response will be discarded.",
-    "</output_contract>",
-    "",
-    "<forbidden>",
-    "Other pipeline steps handle these. Emitting them will overwrite work done elsewhere:",
     "- DO NOT write `wiki/sources/*.md` (the source summary page).",
-    "- DO NOT write `wiki/index.md` (a final pass rebuilds it).",
+    "- DO NOT write `wiki/index.md` (a final pass rebuilds it from all batches).",
     "- DO NOT write `wiki/log.md`.",
     "- DO NOT write `wiki/overview.md`.",
     "- DO NOT emit REVIEW blocks (the final pass handles those).",
-    "- DO NOT write pages for entities/concepts NOT in `<pages_to_write>`, even if you think they're important — they'll be covered by another batch.",
-    "</forbidden>",
+    "- DO NOT write pages for entities/concepts NOT in the lists above, even if you think they're important — they'll be covered by another batch.",
     "",
-    "<frontmatter_rules>",
-    "Every page begins with a YAML frontmatter block. Format rules:",
+    "## Frontmatter Rules (CRITICAL — parser is strict)",
+    "",
+    "Every page begins with a YAML frontmatter block. Format rules, in order of importance:",
+    "",
     "1. The VERY FIRST line of the file MUST be exactly `---` (three hyphens, nothing else).",
-    "   Do NOT wrap in a ```yaml fence. Do NOT prefix with a `frontmatter:` key.",
+    "   Do NOT wrap the file in a ```yaml ... ``` code fence.",
+    "   Do NOT prefix it with a `frontmatter:` key or any other line.",
     "2. Each frontmatter line is a `key: value` pair on its own line.",
     "3. The frontmatter ends with another `---` line on its own.",
     "4. The next line after the closing `---` is the start of the page body.",
-    "5. Arrays use YAML inline form `[a, b, c]`. Wikilinks belong in the BODY only —",
-    "   never write `related: [[a]], [[b]]` (invalid YAML); write `related: [a, b]` with bare slugs.",
+    "5. Arrays use the standard YAML inline form `[a, b, c]` (no outer brackets around each item).",
+    "   Wikilinks belong in the BODY only — never write `related: [[a]], [[b]]` (invalid YAML);",
+    "   write `related: [a, b]` with bare slugs.",
     "",
     "Required fields and types:",
-    "  • type     — `entity` or `concept` (match the list in `<pages_to_write>`)",
+    "  • type     — `entity` or `concept` (match the list above)",
     "  • title    — string (quote it if it contains a colon)",
     "  • created  — date in YYYY-MM-DD form (no quotes)",
     "  • updated  — same as created",
     "  • tags     — array of bare strings: `tags: [microbiology, ai]`",
-    "  • related  — array of bare wiki page slugs: `related: [foo, bar-baz]`. Do NOT include",
-    "               `wiki/`, `.md`, or `[[…]]` here — slugs only.",
+    wikilinkTargets.length > 0
+      ? "  • related  — array of bare wiki page slugs from <valid_wikilink_targets>: `related: [foo, bar-baz]`. Do NOT include `wiki/`, `.md`, or `[[…]]` — slugs only."
+      : "  • related  — array of bare wiki page slugs: `related: [foo, bar-baz]`. Do NOT include `wiki/`, `.md`, or `[[…]]` — slugs only.",
     `  • sources  — array of source filenames; MUST include "${sourceFileName}".`,
     "",
-    "Body rules:",
-    "- Use [[wikilink]] syntax in the BODY for cross-references between pages.",
+    "Other rules:",
+    wikilinkTargets.length > 0
+      ? "- Use [[wikilink]] syntax in the BODY for cross-references. Valid targets are in <valid_wikilink_targets> — wrap every mention of a listed slug as [[slug]]. Do NOT invent slugs outside the list."
+      : "- Use [[wikilink]] syntax in the BODY for cross-references between pages.",
     "- Use kebab-case filenames (e.g., `activity-based-costing.md`, not `Activity Based Costing.md`).",
-    "- Build the page body from the analysis in `<context>` — write SUBSTANTIVE content, not stubs.",
-    "</frontmatter_rules>",
+    "- Build the page body from the analysis below — write SUBSTANTIVE content, not stubs.",
     "",
-    "<language_rule>",
+    purpose ? `## Wiki Purpose\n${purpose}` : "",
+    schema ? `## Wiki Schema\n${schema}` : "",
+    wikilinkTargets.length > 0
+      ? [
+          "<valid_wikilink_targets>",
+          "These are the ONLY valid [[wikilink]] targets and bare slugs for the `related:` field.",
+          "Do NOT invent slugs outside this list.",
+          "",
+          wikilinkTargets.join("\n"),
+          "</valid_wikilink_targets>",
+        ].join("\n")
+      : "",
+    "",
+    // ── OUTPUT FORMAT MUST BE THE LAST SECTION — models weight recent instructions highest ──
+    "## Output Format (MUST FOLLOW EXACTLY)",
+    "",
+    "Your ENTIRE response consists of FILE blocks. Nothing else.",
+    "",
+    "FILE block template:",
+    "```",
+    "---FILE: wiki/entities/some-entity.md---",
+    "(complete file content with YAML frontmatter)",
+    "---END FILE---",
+    "```",
+    "",
+    "## Output Requirements (STRICT — deviations will cause parse failure)",
+    "",
+    "1. The FIRST character of your response MUST be `-` (the opening of `---FILE:`).",
+    "2. DO NOT output any preamble (\"Here are the pages:\", etc.).",
+    "3. DO NOT echo or restate the analysis.",
+    "4. DO NOT output any prose between or after FILE blocks.",
+    "5. Emit EXACTLY one FILE block per name in the lists above — no extras, no omissions.",
+    "6. EVERY FILE block's content MUST be in the mandatory output language specified below.",
+    "",
+    "If you start with anything other than `---FILE:`, the entire response will be discarded.",
+    "",
+    "---",
+    "",
     languageRule(sourceContent),
-    "</language_rule>",
-    "",
-    purpose ? `<wiki_purpose>\n${purpose}\n</wiki_purpose>` : "",
-    schema ? `<wiki_schema>\n${schema}\n</wiki_schema>` : "",
-    index ? `<current_wiki_index>\nUse to set \`related:\` and avoid duplicate slugs.\n\n${index}\n</current_wiki_index>` : "",
   ].filter(Boolean).join("\n")
 }
 
