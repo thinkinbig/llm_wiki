@@ -17,6 +17,15 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { writeFile, readFile, listDirectory, deleteFile } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
 import { hasConfiguredSearchProvider } from "@/lib/web-search"
+import {
+  WIKI_INDEX_PATH,
+  WIKI_LOG_PATH,
+  appendIndexEntry,
+  appendWikiLogContent,
+  formatIndexEntry,
+  formatLogEntry,
+  indexSectionForPageType,
+} from "@/lib/wiki-structural"
 
 const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; label: string; color: string }> = {
   contradiction: { icon: AlertTriangle, label: "Contradiction", color: "text-amber-500" },
@@ -79,23 +88,22 @@ export function ReviewView() {
         const frontmatter = `---\ntype: query\ntitle: "${title.replace(/"/g, '\\"')}"\ncreated: ${date}\ntags: []\n---\n\n`
         await writeFile(filePath, frontmatter + cleanContent)
 
-        // Update index
-        const indexPath = `${pp}/wiki/index.md`
+        const indexPath = `${pp}/${WIKI_INDEX_PATH}`
         let indexContent = ""
         try { indexContent = await readFile(indexPath) } catch { indexContent = "# Wiki Index\n" }
-        const entry = `- [[queries/${slug}-${date}|${title}]]`
-        if (indexContent.includes("## Queries")) {
-          indexContent = indexContent.replace(/(## Queries\n)/, `$1${entry}\n`)
-        } else {
-          indexContent = indexContent.trimEnd() + "\n\n## Queries\n" + entry + "\n"
-        }
-        await writeFile(indexPath, indexContent)
+        const entry = formatIndexEntry(`queries/${slug}-${date}`, "Saved from review", {
+          displayTitle: title,
+        })
+        await writeFile(indexPath, appendIndexEntry(indexContent, "Queries", entry))
 
-        // Append log
-        const logPath = `${pp}/wiki/log.md`
+        const logPath = `${pp}/${WIKI_LOG_PATH}`
         let logContent = ""
         try { logContent = await readFile(logPath) } catch { logContent = "# Wiki Log\n" }
-        await writeFile(logPath, logContent.trimEnd() + `\n- ${date}: Saved query page \`${fileName}\`\n`)
+        const logEntry = formatLogEntry("save", fileName, {
+          date,
+          body: "Saved query page from review.",
+        })
+        await writeFile(logPath, appendWikiLogContent(logContent, logEntry))
 
         // Refresh tree
         const tree = await listDirectory(pp)
@@ -185,24 +193,23 @@ export function ReviewView() {
           const body = `# ${title}\n\n${item.description}\n`
           await writeFile(filePath, frontmatter + body)
 
-          // Update index
-          const indexPath = `${pp}/wiki/index.md`
+          const indexPath = `${pp}/${WIKI_INDEX_PATH}`
           let indexContent = ""
           try { indexContent = await readFile(indexPath) } catch { indexContent = "# Wiki Index\n" }
-          const sectionHeader = `## ${dir.charAt(0).toUpperCase() + dir.slice(1)}`
-          const entry = `- [[${dir}/${slug}-${date}|${title}]]`
-          if (indexContent.includes(sectionHeader)) {
-            indexContent = indexContent.replace(new RegExp(`(${sectionHeader}\n)`), `$1${entry}\n`)
-          } else {
-            indexContent = indexContent.trimEnd() + `\n\n${sectionHeader}\n${entry}\n`
-          }
-          await writeFile(indexPath, indexContent)
+          const section = indexSectionForPageType(pageType)
+          const entry = formatIndexEntry(`${dir}/${slug}-${date}`, `Created from review`, {
+            displayTitle: title,
+          })
+          await writeFile(indexPath, appendIndexEntry(indexContent, section, entry))
 
-          // Log
-          const logPath = `${pp}/wiki/log.md`
+          const logPath = `${pp}/${WIKI_LOG_PATH}`
           let logContent = ""
           try { logContent = await readFile(logPath) } catch { logContent = "# Wiki Log\n" }
-          await writeFile(logPath, logContent.trimEnd() + `\n- ${date}: Created ${pageType} page \`${fileName}\` from review\n`)
+          const logEntry = formatLogEntry("create", fileName, {
+            date,
+            body: `Created ${pageType} page from review.`,
+          })
+          await writeFile(logPath, appendWikiLogContent(logContent, logEntry))
 
           // Refresh
           const tree = await listDirectory(pp)

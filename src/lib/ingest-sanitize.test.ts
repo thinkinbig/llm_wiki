@@ -64,7 +64,7 @@ describe("sanitizeIngestedFileContent", () => {
     const input =
       "---\ntype: entity\nrelated: [[a]], [[b]], [[c]]\n---\n\nbody"
     expect(sanitizeIngestedFileContent(input)).toBe(
-      `---\ntype: entity\nrelated: ["[[a]]", "[[b]]", "[[c]]"]\n---\n\nbody`,
+      `---\ntype: entity\nrelated: ["[[a]]", "[[b]]", "[[c]]"]\n---\nbody`,
     )
   })
 
@@ -121,7 +121,7 @@ describe("sanitizeIngestedFileContent", () => {
       "```yaml\nfrontmatter:\n---\ntype: entity\nrelated: [[a]], [[b]]\n---\n\n# Body\n```"
     const out = sanitizeIngestedFileContent(input)
     expect(out).toBe(
-      `---\ntype: entity\nrelated: ["[[a]]", "[[b]]"]\n---\n\n# Body`,
+      `---\ntype: entity\nrelated: ["[[a]]", "[[b]]"]\n---\n# Body`,
     )
   })
 
@@ -141,6 +141,171 @@ describe("sanitizeIngestedFileContent", () => {
     const out = sanitizeIngestedFileContent(input)
     expect(out).toContain('sources: ["paper.pdf"]\n---')
     expect(parseFrontmatter(out).frontmatter?.title).toBe("Foo")
+  })
+
+  it("repairs glued opening fence and nested wikilinks in related/sources", () => {
+    const input = [
+      "--- type: entity",
+      "title: Google",
+      'related: [[[spanner]], [[bigtable]]]',
+      'sources: ["DDIA ([[z-lib.org]]).pdf"]]]',
+      "---",
+      "",
+      "See [[spanner]].",
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).toMatch(/^---\ntype: entity/m)
+    expect(out).toContain("related: [spanner, bigtable]")
+    expect(out).toContain("(z-lib.org).pdf")
+    expect(out).not.toContain("[[[")
+    expect(parseFrontmatter(out).frontmatter?.related).toEqual(["spanner", "bigtable"])
+  })
+
+  it("wraps fenceless frontmatter and repairs tags/sources wikilinks", () => {
+    const input = [
+      "type: concept",
+      "title: Replaying Old Messages",
+      "tags: [messaging, durability, [[idempotence]]]",
+      "related: []",
+      "sources: [\"DDIA ([[z-lib.org]]).pdf\"]",
+      "---",
+      "",
+      "Body text.",
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).toMatch(/^---\ntype: concept/m)
+    expect(parseFrontmatter(out).frontmatter?.tags).toEqual(
+      expect.arrayContaining(["messaging", "durability", "idempotence"]),
+    )
+    expect(out).toContain("(z-lib.org).pdf")
+  })
+
+  it("repairs escaped brackets and *** wrappers", () => {
+    const input = [
+      "***",
+      "type: entity",
+      "title: Bill Gates",
+      "tags: \\[]",
+      "related: \\[[[microsoft]], [[bill-melinda-gates-foundation]]]",
+      'sources: \\["DDIA ([[z-lib.org]]).pdf"]]',
+      "----------------------------------------------------------------",
+      "***",
+      "",
+      "See [[microsoft]].",
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).not.toMatch(/\\[\[\]]/)
+    expect(out).toContain("related: [microsoft, bill-melinda-gates-foundation]")
+    expect(out).toContain("(z-lib.org).pdf")
+    expect(out).toContain("See [[microsoft]]")
+  })
+
+  it("repairs ---type glued opener and wikilink inside quoted title", () => {
+    const input = [
+      "---type: entity",
+      'title: "[[yahoo|Yahoo]]! Sherpa"',
+      "related: [[[hadoop]], pig, [[teradata]]]",
+      'sources: ["DDIA ([[z-lib.org]]).pdf"]',
+      "---",
+      "",
+      "Body.",
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).toMatch(/^---\ntype: entity/m)
+    expect(out).toContain('title: "Yahoo! Sherpa"')
+    expect(parseFrontmatter(out).frontmatter?.related).toEqual(
+      expect.arrayContaining(["hadoop", "pig", "teradata"]),
+    )
+    expect(out).toContain("(z-lib.org).pdf")
+  })
+
+  it("repairs ---yaml opener and partial wikilink in title", () => {
+    const input = [
+      "---yaml",
+      "type: concept",
+      "title: [[postgresql|PostgreSQL]] binlog",
+      'sources: ["DDIA ([[z-lib.org]]).pdf"]',
+      "---",
+      "",
+      "Body.",
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).toMatch(/^---\ntype: concept/m)
+    expect(out).toContain('title: "PostgreSQL binlog"')
+    expect(out).toContain("(z-lib.org).pdf")
+  })
+
+  it("repairs ---yaml--- glued opener and nested related with bare slugs", () => {
+    const input = [
+      "---yaml---",
+      "type: concept",
+      "related: [[[garbage-collection-pauses]]]",
+      'sources: ["DDIA ([[z-lib.org]]).pdf"]',
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).toContain("related: [garbage-collection-pauses]")
+    expect(parseFrontmatter(out).frontmatter?.related).toEqual([
+      "garbage-collection-pauses",
+    ])
+  })
+
+  it("strips ---FILE concatenation tails", () => {
+    const input = [
+      "---",
+      "type: concept",
+      "title: Read Committed",
+      "---",
+      "",
+      "Read committed body.",
+      "",
+      "---FILE: wiki/concepts/[[readers-schema]].md---",
+      "---",
+      "type: concept",
+      "title: [[reader-schema|Reader's schema]]",
+      "---",
+      "",
+      "Wrong page body.",
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).not.toContain("---FILE:")
+    expect(out).not.toContain("Wrong page body")
+    expect(out).toContain("Read committed body.")
+  })
+
+  it("repairs title pipe-wikilink and sources when closing --- is missing", () => {
+    const input = [
+      "--- ",
+      "type: entity",
+      "title: [[monetdbx100|MonetDB/X100]]",
+      "created: 2026-05-19",
+      "updated: 2026-05-19",
+      "tags: [databases, columnar, analytics]",
+      "related: []",
+      'sources: ["DDIA by Kleppmann ([[z-lib.org]]).pdf"]',
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).toMatch(/title: "?MonetDB\/X100"?/)
+    expect(out).toContain("(z-lib.org).pdf")
+    expect(out).toMatch(/\n---\s*$/)
+    expect(parseFrontmatter(out).frontmatter?.title).toBe("MonetDB/X100")
+  })
+
+  it("repairs nested wikilinks in related and inside quoted sources", () => {
+    const input = [
+      "---",
+      "type: entity",
+      "title: Google",
+      'related: [[[spanner]], [[bigtable]]]',
+      'sources: ["DDIA by Kleppmann ([[z-lib.org]]).pdf"]',
+      "---",
+      "",
+      "See [[spanner]].",
+    ].join("\n")
+    const out = sanitizeIngestedFileContent(input)
+    expect(out).toContain("related: [spanner, bigtable]")
+    expect(out).toContain("(z-lib.org).pdf")
+    expect(out).not.toContain("[[[")
+    expect(parseFrontmatter(out).frontmatter?.related).toEqual(["spanner", "bigtable"])
   })
 
   it("repairs Milkdown escaped fences and brackets", () => {

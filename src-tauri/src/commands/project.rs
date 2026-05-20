@@ -93,12 +93,13 @@ venue: ""
 
 ## Log Format
 
-`wiki/log.md` records research activity in reverse chronological order:
+`wiki/log.md` is append-only (newest entries at the end). Each entry:
 ```
-## YYYY-MM-DD
+## [YYYY-MM-DD] <action> | <short subject>
 
-- Action taken / finding noted
+Optional body lines.
 ```
+Recent: `grep '^## \[' wiki/log.md | tail -5`
 
 ## Cross-referencing Rules
 
@@ -172,9 +173,9 @@ When sources contradict each other:
     let log_content = format!(
         r#"# Research Log
 
-## {today}
+## [{today}] create | Project initialized
 
-- Project created
+Wiki project created from template.
 "#
     );
     write_file_inner(root.join("wiki/log.md"), &log_content)?;

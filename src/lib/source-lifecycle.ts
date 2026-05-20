@@ -20,6 +20,7 @@ import {
   writeSources,
 } from "@/lib/sources-merge"
 import { removeFromIngestCache } from "@/lib/ingest-cache"
+import { appendWikiLogContent, formatLogEntry } from "@/lib/wiki-structural"
 import { removePageEmbedding } from "@/lib/embedding"
 import {
   buildDeletedKeys,
@@ -391,8 +392,12 @@ async function appendSourceDeleteLog(
     const date = new Date().toISOString().slice(0, 10)
     const subject = names.length === 1 ? names[0] : `${names.length} source files`
     const listed = names.length === 1 ? "" : `\n\nSources:\n${names.map((name) => `- ${name}`).join("\n")}`
-    const logEntry = `\n## [${date}] ${detail.reason} | ${subject}\n\nDeleted ${names.length} source file${names.length === 1 ? "" : "s"} and ${detail.deletedWikiCount} wiki pages.${detail.keptWikiCount > 0 ? ` ${detail.keptWikiCount} shared pages kept (have other sources).` : ""}${listed}\n`
-    await writeFile(logPath, logContent.trimEnd() + logEntry)
+    const body =
+      `[${detail.reason}] Deleted ${names.length} source file${names.length === 1 ? "" : "s"} and ${detail.deletedWikiCount} wiki pages.` +
+      `${detail.keptWikiCount > 0 ? ` ${detail.keptWikiCount} shared pages kept (have other sources).` : ""}` +
+      `${listed}`
+    const logEntry = formatLogEntry("delete", subject, { date, body })
+    await writeFile(logPath, appendWikiLogContent(logContent, logEntry))
   } catch (err) {
     console.warn("[source-lifecycle] failed to append delete log:", err)
   }

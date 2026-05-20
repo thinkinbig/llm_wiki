@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core"
-import { readFile, writeFile, listDirectory } from "@/commands/fs"
+import { readFile, writeFile, listDirectory, fileExists } from "@/commands/fs"
 import { streamChat } from "@/lib/llm-client"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -9,15 +9,28 @@ import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import type { FileNode } from "@/types/wiki"
 import { makeQuerySlug } from "@/lib/wiki-filename"
-import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
+import { checkIngestCache, saveIngestCache, quickCheckIngestCache } from "@/lib/ingest-cache"
 import {
   loadCheckpoint,
   newCheckpoint,
   saveCheckpoint,
   clearCheckpoint,
+  checkpointPath,
   type IngestCheckpoint,
 } from "@/lib/ingest-checkpoint"
 import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
+import {
+  INDEX_ENTRY_FORMAT_SPEC,
+  LOG_ENTRY_FORMAT_SPEC,
+  WIKI_INDEX_PATH,
+  WIKI_LOG_PATH,
+  WIKI_OVERVIEW_PATH,
+  appendWikiLogContent,
+  isCanonicalWikiIndexPath,
+  isCanonicalWikiLogPath,
+  isCanonicalWikiOverviewPath,
+  normalizeLogAppendContent,
+} from "@/lib/wiki-structural"
 import { mergePageContent, type MergeFn } from "@/lib/page-merge"
 import { ensureSourcesInContent } from "@/lib/sources-merge"
 import {
@@ -1183,15 +1196,25 @@ export function chunkForAnalysis(content: string, chunkSize: number, overlap: nu
  * "updated" index based on the same pre-state and overwrite each
  * other's additions.
  */
+export interface AutoIngestOptions {
+  folderContext?: string
+  /** Queue runner reconciles once when drained; skip per-task reconcile. */
+  deferIndexReconcile?: boolean
+}
+
 export async function autoIngest(
   projectPath: string,
   sourcePath: string,
   llmConfig: LlmConfig,
   signal?: AbortSignal,
-  folderContext?: string,
+  folderContextOrOptions?: string | AutoIngestOptions,
 ): Promise<string[]> {
+  const options: AutoIngestOptions =
+    typeof folderContextOrOptions === "string"
+      ? { folderContext: folderContextOrOptions }
+      : (folderContextOrOptions ?? {})
   return withProjectLock(normalizePath(projectPath), () =>
-    autoIngestImpl(projectPath, sourcePath, llmConfig, signal, folderContext),
+    autoIngestImpl(projectPath, sourcePath, llmConfig, signal, options),
   )
 }
 
@@ -1260,14 +1283,23 @@ async function tryWriteAndIngestChapters(
     })
 
     // Call autoIngestImpl directly — we already hold the project lock.
-    const chapterPaths = await autoIngestImpl(
-      pp,
-      chapterPath,
-      runCtx.llmConfig,
-      runCtx.signal,
-      runCtx.folderContext,
-    )
+    const chapterPaths = await autoIngestImpl(pp, chapterPath, runCtx.llmConfig, runCtx.signal, {
+      folderContext: runCtx.folderContext,
+      deferIndexReconcile: true,
+    })
     allWrittenPaths.push(...chapterPaths)
+  }
+
+  if (allWrittenPaths.length > 0) {
+    try {
+      const { reconcileWikiIndexProject } = await import("@/lib/index-reconcile")
+      await reconcileWikiIndexProject(pp)
+    } catch (err) {
+      console.warn(
+        "[ingest:chapter] index reconcile failed:",
+        err instanceof Error ? err.message : err,
+      )
+    }
   }
 
   return allWrittenPaths
@@ -1278,8 +1310,9 @@ async function autoIngestImpl(
   sourcePath: string,
   llmConfig: LlmConfig,
   signal?: AbortSignal,
-  folderContext?: string,
+  options: AutoIngestOptions = {},
 ): Promise<string[]> {
+  const folderContext = options.folderContext
   const pp = normalizePath(projectPath)
   const sp = normalizePath(sourcePath)
   const activity = useActivityStore.getState()
@@ -1292,6 +1325,22 @@ async function autoIngestImpl(
     detail: "Reading source...",
     filesWritten: [],
   })
+
+  // Stat pre-check: if mtime+size unchanged and no checkpoint, skip PDF extraction entirely.
+  // Only bypasses the image captioning pass — acceptable since images also haven't changed.
+  const hasCheckpoint = await fileExists(checkpointPath(pp, fileName))
+  if (!hasCheckpoint) {
+    const statCached = await quickCheckIngestCache(pp, fileName, sp)
+    if (statCached !== null) {
+      console.log(`[ingest:diag] stat pre-check hit for "${fileName}" — skipping source read`)
+      activity.updateItem(activityId, {
+        status: "complete",
+        detail: `Skipped (unchanged) — ${statCached.length} files from previous ingest`,
+        filesWritten: statCached,
+      })
+      return statCached
+    }
+  }
 
   const [sourceContent, schema, purpose, index, overview] = await Promise.all([
     tryReadFile(sp),
@@ -1311,14 +1360,20 @@ async function autoIngestImpl(
     source: { raw: sourceContent, enriched: sourceContent },
   }
 
+  // ── Checkpoint (load before cache — pending catch-up must bypass cache hit) ──
+  const existingCheckpoint = await loadCheckpoint(pp, fileName, sourceContent)
+  const pendingCatchupResume = existingCheckpoint?.pendingCatchupRetries?.length ?? 0
+
   // ── Cache check: skip re-ingest if source content hasn't changed ──
   //
   // Cache hits may still run caption + source-summary injection when
   // multimodal is on, but image bytes come from `.llm-wiki/extract-manifest-*.json`
   // when the source hash and media files are unchanged (no pdfium re-scan).
+  // When `pendingCatchupRetries` is non-empty we fall through to a catch-up-only
+  // resume instead of returning early — otherwise stub pages never get compensated.
   const cachedFiles = await checkIngestCache(pp, fileName, sourceContent)
   console.log(`[ingest:diag] cache check for "${fileName}":`, cachedFiles === null ? "MISS (full pipeline)" : `HIT (${cachedFiles.length} cached files)`)
-  if (cachedFiles !== null) {
+  if (cachedFiles !== null && pendingCatchupResume === 0) {
     try {
       console.log(`[ingest:diag] cache-hit branch: starting image extraction for ${sp}`)
       const savedImages = await loadOrExtractSourceImages(pp, sp, sourceContent)
@@ -1393,12 +1448,55 @@ async function autoIngestImpl(
     return cachedFiles
   }
 
+  if (
+    cachedFiles !== null &&
+    pendingCatchupResume > 0 &&
+    existingCheckpoint?.analysis
+  ) {
+    runCtx.checkpoint = existingCheckpoint
+    const parsedResume = parseAnalysisOutput(existingCheckpoint.analysis, 0)
+    if (parsedResume.manifestFound && parsedResume.entities.length > 0) {
+      activity.updateItem(activityId, {
+        detail: `Resuming catch-up (${pendingCatchupResume} page(s) pending)...`,
+      })
+      const primaryWritten = existingCheckpoint.mainWrittenPaths ?? []
+      const followUp = await runFollowUpPasses(
+        runCtx,
+        parsedResume.entities,
+        existingCheckpoint.analysis,
+        primaryWritten,
+        {
+          onProgress: (detail) =>
+            useActivityStore.getState().updateItem(activityId, { detail }),
+          onError: (detail) =>
+            useActivityStore.getState().updateItem(activityId, { status: "error", detail }),
+          onReviews: (items) => useReviewStore.getState().addItems(items),
+        },
+      )
+      const resumePaths = [...new Set([...primaryWritten, ...followUp.writtenPaths])]
+      await finalizeIngestCacheAndCheckpoint(
+        pp,
+        fileName,
+        sourceContent,
+        resumePaths,
+        followUp.hardFailures,
+        runCtx.checkpoint,
+        sp,
+      )
+      const stillPending = runCtx.checkpoint?.pendingCatchupRetries?.length ?? 0
+      activity.updateItem(activityId, {
+        status: followUp.hardFailures.length > 0 ? "error" : "done",
+        detail:
+          stillPending > 0
+            ? `Catch-up incomplete — ${stillPending} page(s) still pending (checkpoint kept)`
+            : `Catch-up complete — ${resumePaths.length} file(s)`,
+        filesWritten: resumePaths,
+      })
+      return resumePaths
+    }
+  }
+
   // ── Checkpoint: resume Stage 1 / batch progress from prior runs ──
-  // Loaded only on cache miss — a cache hit means a complete prior run
-  // already exists, so there's nothing to resume. `loadCheckpoint`
-  // returns null when the source content has changed since the
-  // checkpoint was written, falling through to a fresh `newCheckpoint`.
-  const existingCheckpoint = await loadCheckpoint(pp, fileName, sourceContent)
   runCtx.checkpoint = existingCheckpoint ?? (await newCheckpoint(sourceContent))
   if (existingCheckpoint) {
     const stage1 = existingCheckpoint.analysis ? "Stage 1✓" : "Stage 1·"
@@ -1764,19 +1862,15 @@ async function autoIngestImpl(
     ? [...writtenPaths, ...chapterWrittenPaths]
     : writtenPaths
 
-  if (allPaths.length > 0 && hardFailures.length === 0) {
-    await saveIngestCache(pp, fileName, sourceContent, allPaths)
-    // Run completed cleanly — drop the resume record so a future
-    // re-ingest (e.g. after the source is edited) starts fresh and
-    // doesn't try to short-circuit Stage 1 from stale checkpoint data.
-    await clearCheckpoint(pp, fileName)
-  } else if (hardFailures.length > 0) {
-    console.warn(
-      `[ingest] Skipping cache save for "${fileName}" — ${hardFailures.length} block(s) failed to write: ${hardFailures.join(", ")}`,
-    )
-    // Keep the checkpoint: the user / queue may retry, and the
-    // batches that DID succeed should still be skippable on resume.
-  }
+  await finalizeIngestCacheAndCheckpoint(
+    pp,
+    fileName,
+    sourceContent,
+    allPaths,
+    hardFailures,
+    runCtx.checkpoint,
+    sp,
+  )
 
   // ── Step 6: Generate embeddings (if enabled) ───────────────
   const embCfg = useWikiStore.getState().embeddingConfig
@@ -1813,6 +1907,18 @@ async function autoIngestImpl(
     detail,
     filesWritten: totalPaths,
   })
+
+  if (totalPaths.length > 0 && !options.deferIndexReconcile && !signal?.aborted) {
+    try {
+      const { reconcileWikiIndexProject } = await import("@/lib/index-reconcile")
+      await reconcileWikiIndexProject(pp)
+    } catch (err) {
+      console.warn(
+        "[ingest] index reconcile failed:",
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
 
   return totalPaths
 }
@@ -1921,16 +2027,48 @@ async function writeFileBlocks(
 
     const fullPath = `${ctx.projectPath}/${relativePath}`
     try {
-      if (relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")) {
-        const existing = await tryReadFile(fullPath)
-        const appended = existing ? `${existing}\n\n${content.trim()}` : content.trim()
-        await writeFile(fullPath, appended)
-      } else if (
-        relativePath === "wiki/index.md" ||
-        relativePath.endsWith("/index.md") ||
-        relativePath === "wiki/overview.md" ||
-        relativePath.endsWith("/overview.md")
+      if (
+        relativePath.endsWith("/log.md") ||
+        relativePath === "wiki/log.md"
       ) {
+        if (!isCanonicalWikiLogPath(relativePath)) {
+          const msg = `Ignored log FILE at "${relativePath}" — append only to ${WIKI_LOG_PATH}.`
+          console.warn(`[ingest] ${msg}`)
+          warnings.push(msg)
+          continue
+        }
+        const logPath = `${ctx.projectPath}/${WIKI_LOG_PATH}`
+        const existing = await tryReadFile(logPath)
+        const entry = normalizeLogAppendContent(content, {
+          action: "ingest",
+          subject: ctx.sourceFileName,
+        })
+        await writeFile(logPath, appendWikiLogContent(existing, entry))
+        writtenPaths.push(WIKI_LOG_PATH)
+        continue
+      } else if (
+        relativePath.endsWith("/index.md") ||
+        relativePath === "wiki/index.md"
+      ) {
+        if (!isCanonicalWikiIndexPath(relativePath)) {
+          const msg = `Ignored index FILE at "${relativePath}" — catalog lives only at ${WIKI_INDEX_PATH}.`
+          console.warn(`[ingest] ${msg}`)
+          warnings.push(msg)
+          continue
+        }
+        await writeFile(fullPath, content)
+        writtenPaths.push(relativePath)
+        continue
+      } else if (
+        relativePath.endsWith("/overview.md") ||
+        relativePath === "wiki/overview.md"
+      ) {
+        if (!isCanonicalWikiOverviewPath(relativePath)) {
+          const msg = `Ignored overview FILE at "${relativePath}" — use ${WIKI_OVERVIEW_PATH}.`
+          console.warn(`[ingest] ${msg}`)
+          warnings.push(msg)
+          continue
+        }
         // Listing pages (index / overview) are always overwritten
         // wholesale — their sources field is incidental and merging
         // wouldn't make semantic sense (they aren't source-derived
@@ -2315,7 +2453,7 @@ export function buildGenerationPrompt(schema: string, purpose: string, index: st
     ? [
         `1. A source summary page at **wiki/sources/${sourceBaseName}.md** (MUST use this exact path)`,
         "2. An updated wiki/index.md — add entries for the NEWLY-WRITTEN entity/concept pages (listed in the user message) AND preserve all existing entries.",
-        "3. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
+        `3. A log entry for ${WIKI_LOG_PATH} (append ONLY the new entry — see Log Format below)`,
         "4. An updated wiki/overview.md — a high-level summary of what the entire wiki covers, updated to reflect the newly ingested source. This should be a comprehensive 2-5 paragraph overview of ALL topics in the wiki, not just the new source.",
         "",
         "## DO NOT write entity or concept pages",
@@ -2326,7 +2464,7 @@ export function buildGenerationPrompt(schema: string, purpose: string, index: st
         "2. Entity pages in wiki/entities/ for key entities identified in the analysis",
         "3. Concept pages in wiki/concepts/ for key concepts identified in the analysis",
         "4. An updated wiki/index.md — add new entries to existing categories, preserve all existing entries",
-        "5. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
+        `5. A log entry for ${WIKI_LOG_PATH} (append ONLY the new entry — see Log Format below)`,
         "6. An updated wiki/overview.md — a high-level summary of what the entire wiki covers, updated to reflect the newly ingested source. This should be a comprehensive 2-5 paragraph overview of ALL topics in the wiki, not just the new source.",
       ]
 
@@ -2424,6 +2562,16 @@ export function buildGenerationPrompt(schema: string, purpose: string, index: st
     overview ? `## Current Overview (update this to reflect the new source)\n${overview}` : "",
     "",
     // ── OUTPUT FORMAT MUST BE THE LAST SECTION — models weight recent instructions highest ──
+    "## Log Format (wiki/log.md — append block only)",
+    "",
+    LOG_ENTRY_FORMAT_SPEC,
+    `Use action \`ingest\` and subject \`${sourceFileName}\` unless the entry body clearly needs a different short subject.`,
+    "",
+    "## Index Format (wiki/index.md — full file)",
+    "",
+    INDEX_ENTRY_FORMAT_SPEC,
+    "Preserve every existing index line; add new pages under the correct ## section.",
+    "",
     "## Output Format (MUST FOLLOW EXACTLY — this is how the parser reads your response)",
     "",
     "Your ENTIRE response consists of FILE blocks followed by optional REVIEW blocks. Nothing else.",
@@ -2475,6 +2623,38 @@ async function tryReadFile(path: string): Promise<string> {
     return await readFile(path)
   } catch {
     return ""
+  }
+}
+
+/**
+ * Mark ingest complete only when catch-up retry queue is empty. Otherwise
+ * keep the checkpoint so the next run can resume tail catch-up (including
+ * on cache hit via the catch-up-only branch above).
+ */
+async function finalizeIngestCacheAndCheckpoint(
+  projectPath: string,
+  fileName: string,
+  sourceContent: string,
+  allPaths: string[],
+  hardFailures: string[],
+  checkpoint: IngestCheckpoint | undefined,
+  sourcePath?: string,
+): Promise<void> {
+  const pendingCatchup = checkpoint?.pendingCatchupRetries?.length ?? 0
+  if (allPaths.length > 0 && hardFailures.length === 0 && pendingCatchup === 0) {
+    await saveIngestCache(projectPath, fileName, sourceContent, allPaths, sourcePath)
+    await clearCheckpoint(projectPath, fileName)
+  } else if (allPaths.length > 0 && hardFailures.length === 0 && pendingCatchup > 0) {
+    console.warn(
+      `[ingest] "${fileName}": ${pendingCatchup} catch-up page(s) still pending — keeping checkpoint, not writing ingest cache`,
+    )
+    if (checkpoint) {
+      await saveCheckpoint(projectPath, fileName, checkpoint)
+    }
+  } else if (hardFailures.length > 0) {
+    console.warn(
+      `[ingest] Skipping cache save for "${fileName}" — ${hardFailures.length} block(s) failed to write: ${hardFailures.join(", ")}`,
+    )
   }
 }
 
@@ -2805,7 +2985,9 @@ export async function executeIngestWrites(
     "---END FILE---",
     "```",
     "",
-    "For wiki/log.md, include a log entry to append. For all other files, output the complete file content.",
+    `For ${WIKI_LOG_PATH}, output ONE append block using the Log Format below. For all other files, output the complete file content.`,
+    "",
+    LOG_ENTRY_FORMAT_SPEC,
     "Use relative paths from the project root (e.g., wiki/sources/topic.md).",
     "Do not include any other text outside the FILE blocks.",
   ]
@@ -2866,16 +3048,23 @@ export async function executeIngestWrites(
     const fullPath = `${pp}/${relativePath}`
 
     try {
-      if (relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")) {
-        const existing = await tryReadFile(fullPath)
-        const appended = existing
-          ? `${existing}\n\n${content.trim()}`
-          : content.trim()
-        await writeFile(fullPath, appended)
+      if (relativePath.endsWith("/log.md") || relativePath === "wiki/log.md") {
+        if (!isCanonicalWikiLogPath(relativePath)) {
+          console.warn(`[ingest] Ignored log FILE at "${relativePath}" — use ${WIKI_LOG_PATH}`)
+          continue
+        }
+        const logPath = `${pp}/${WIKI_LOG_PATH}`
+        const existing = await tryReadFile(logPath)
+        const entry = normalizeLogAppendContent(content, {
+          action: "manual",
+          subject: getFileName(store.ingestSource ?? "") || "chat save",
+        })
+        await writeFile(logPath, appendWikiLogContent(existing, entry))
+        writtenPaths.push(WIKI_LOG_PATH)
       } else {
         await writeFile(fullPath, content)
+        writtenPaths.push(relativePath)
       }
-      writtenPaths.push(fullPath)
     } catch (err) {
       console.error(`Failed to write ${fullPath}:`, err)
     }

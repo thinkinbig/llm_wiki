@@ -14,6 +14,7 @@ export interface RetrievalNode {
   readonly sources: readonly string[]
   readonly outLinks: ReadonlySet<string>
   readonly inLinks: ReadonlySet<string>
+  readonly relatedLinks: ReadonlySet<string>
 }
 
 export interface RetrievalGraph {
@@ -30,6 +31,7 @@ const WIKILINK_REGEX = /\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]/g
 const WEIGHTS = {
   directLink: 3.0,
   sourceOverlap: 4.0,
+  relatedLink: 4.5,
   commonNeighbor: 1.5,
   typeAffinity: 1.0,
 } as const
@@ -68,35 +70,32 @@ function fileNameToId(fileName: string): string {
   return fileName.replace(/\.md$/, "")
 }
 
-function extractFrontmatter(content: string): { title: string; type: string; sources: string[] } {
+function parseYamlArray(fm: string, field: string): string[] {
+  const results: string[] = []
+  const blockMatch = fm.match(new RegExp(`^${field}:\\s*\\n((?:\\s+-\\s+.+\\n?)*)`, "m"))
+  if (blockMatch) {
+    for (const line of blockMatch[1].split("\n")) {
+      const itemMatch = line.match(/^\s+-\s+["']?(.+?)["']?\s*$/)
+      if (itemMatch) results.push(itemMatch[1])
+    }
+  } else {
+    const inlineMatch = fm.match(new RegExp(`^${field}:\\s*\\[([^\\]]*)\\]`, "m"))
+    if (inlineMatch) {
+      for (const item of inlineMatch[1].split(",")) {
+        const trimmed = item.trim().replace(/^["']|["']$/g, "")
+        if (trimmed) results.push(trimmed)
+      }
+    }
+  }
+  return results
+}
+
+function extractFrontmatter(content: string): { title: string; type: string; sources: string[]; related: string[] } {
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
   const fm = fmMatch ? fmMatch[1] : ""
 
   const titleMatch = fm.match(/^title:\s*["']?(.+?)["']?\s*$/m)
   const typeMatch = fm.match(/^type:\s*["']?(.+?)["']?\s*$/m)
-
-  // Parse sources array from YAML frontmatter
-  const sources: string[] = []
-  const sourcesBlockMatch = fm.match(/^sources:\s*\n((?:\s+-\s+.+\n?)*)/m)
-  if (sourcesBlockMatch) {
-    const lines = sourcesBlockMatch[1].split("\n")
-    for (const line of lines) {
-      const itemMatch = line.match(/^\s+-\s+["']?(.+?)["']?\s*$/)
-      if (itemMatch) {
-        sources.push(itemMatch[1])
-      }
-    }
-  } else {
-    // Single-line: sources: ["a.pdf", "b.pdf"] or sources: [a.pdf]
-    const inlineMatch = fm.match(/^sources:\s*\[([^\]]*)\]/m)
-    if (inlineMatch) {
-      const items = inlineMatch[1].split(",")
-      for (const item of items) {
-        const trimmed = item.trim().replace(/^["']|["']$/g, "")
-        if (trimmed) sources.push(trimmed)
-      }
-    }
-  }
 
   let title = titleMatch ? titleMatch[1].trim() : ""
   if (!title) {
@@ -107,7 +106,8 @@ function extractFrontmatter(content: string): { title: string; type: string; sou
   return {
     title,
     type: typeMatch ? typeMatch[1].trim().toLowerCase() : "other",
-    sources,
+    sources: parseYamlArray(fm, "sources"),
+    related: parseYamlArray(fm, "related"),
   }
 }
 
@@ -141,6 +141,7 @@ function getNeighbors(node: RetrievalNode): ReadonlySet<string> {
   const neighbors = new Set<string>()
   for (const id of node.outLinks) neighbors.add(id)
   for (const id of node.inLinks) neighbors.add(id)
+  for (const id of node.relatedLinks) neighbors.add(id)
   return neighbors
 }
 
@@ -181,6 +182,7 @@ export async function buildRetrievalGraph(
     path: string
     sources: string[]
     rawLinks: string[]
+    rawRelated: string[]
     fileName: string
   }> = []
 
@@ -201,6 +203,7 @@ export async function buildRetrievalGraph(
       path: file.path,
       sources: fm.sources,
       rawLinks: extractWikilinks(content),
+      rawRelated: fm.related,
       fileName: file.name,
     })
   }
@@ -210,10 +213,12 @@ export async function buildRetrievalGraph(
   // Second pass: resolve links and build graph nodes
   const outLinksMap = new Map<string, Set<string>>()
   const inLinksMap = new Map<string, Set<string>>()
+  const relatedLinksMap = new Map<string, Set<string>>()
 
   for (const id of nodeIds) {
     outLinksMap.set(id, new Set())
     inLinksMap.set(id, new Set())
+    relatedLinksMap.set(id, new Set())
   }
 
   for (const raw of rawNodes) {
@@ -222,6 +227,11 @@ export async function buildRetrievalGraph(
       if (resolvedId === null || resolvedId === raw.id) continue
       outLinksMap.get(raw.id)!.add(resolvedId)
       inLinksMap.get(resolvedId)!.add(raw.id)
+    }
+    for (const relTarget of raw.rawRelated) {
+      const resolvedId = resolveTarget(relTarget, nodeIds)
+      if (resolvedId === null || resolvedId === raw.id) continue
+      relatedLinksMap.get(raw.id)!.add(resolvedId)
     }
   }
 
@@ -236,6 +246,7 @@ export async function buildRetrievalGraph(
       sources: Object.freeze([...raw.sources]),
       outLinks: Object.freeze(outLinksMap.get(raw.id) ?? new Set<string>()),
       inLinks: Object.freeze(inLinksMap.get(raw.id) ?? new Set<string>()),
+      relatedLinks: Object.freeze(relatedLinksMap.get(raw.id) ?? new Set<string>()),
     })
   }
 
@@ -256,7 +267,12 @@ export function calculateRelevance(
   const backwardLinks = nodeB.outLinks.has(nodeA.id) ? 1 : 0
   const directLinkScore = (forwardLinks + backwardLinks) * WEIGHTS.directLink
 
-  // Signal 2: Source overlap (weight 4.0)
+  // Signal 2: Semantic related links (weight 4.5) — LLM-chosen explicit relationships
+  const relatedForward = nodeA.relatedLinks.has(nodeB.id) ? 1 : 0
+  const relatedBackward = nodeB.relatedLinks.has(nodeA.id) ? 1 : 0
+  const relatedLinkScore = (relatedForward + relatedBackward) * WEIGHTS.relatedLink
+
+  // Signal 3: Source overlap (weight 4.0)
   const sourcesA = new Set(nodeA.sources)
   let sharedSourceCount = 0
   for (const src of nodeB.sources) {
@@ -264,7 +280,7 @@ export function calculateRelevance(
   }
   const sourceOverlapScore = sharedSourceCount * WEIGHTS.sourceOverlap
 
-  // Signal 3: Common neighbors - Adamic-Adar (weight 1.5)
+  // Signal 4: Common neighbors - Adamic-Adar (weight 1.5)
   const neighborsA = getNeighbors(nodeA)
   const neighborsB = getNeighbors(nodeB)
   let adamicAdar = 0
@@ -279,11 +295,11 @@ export function calculateRelevance(
   }
   const commonNeighborScore = adamicAdar * WEIGHTS.commonNeighbor
 
-  // Signal 4: Type affinity (weight 1.0)
+  // Signal 5: Type affinity (weight 1.0)
   const affinityMap = TYPE_AFFINITY[nodeA.type]
   const typeAffinityScore = (affinityMap?.[nodeB.type] ?? 0.5) * WEIGHTS.typeAffinity
 
-  return directLinkScore + sourceOverlapScore + commonNeighborScore + typeAffinityScore
+  return directLinkScore + relatedLinkScore + sourceOverlapScore + commonNeighborScore + typeAffinityScore
 }
 
 export function getRelatedNodes(

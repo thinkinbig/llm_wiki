@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import { buildAnalysisPrompt, type AnalysisEntity } from "./analysis"
 import { buildGenerationPrompt, buildEntityBatchPrompt } from "./ingest"
+import { LOG_ENTRY_FORMAT_SPEC } from "./wiki-structural"
 import { useWikiStore } from "@/stores/wiki-store"
 
 beforeEach(() => {
@@ -185,6 +186,7 @@ describe("buildGenerationPrompt — skipContentPages mode", () => {
     expect(prompt).toContain("wiki/index.md")
     expect(prompt).toContain("wiki/log.md")
     expect(prompt).toContain("wiki/overview.md")
+    expect(prompt).toContain(LOG_ENTRY_FORMAT_SPEC)
   })
 
   it("skip mode includes an explicit DO NOT-write warning for entity/concept paths", () => {

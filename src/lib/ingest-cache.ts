@@ -1,4 +1,4 @@
-import { readFile, writeFile, fileExists } from "@/commands/fs"
+import { readFile, writeFile, fileExists, getFileModifiedTime, getFileSize } from "@/commands/fs"
 import { normalizePath, isAbsolutePath } from "@/lib/path-utils"
 
 /**
@@ -11,6 +11,8 @@ interface CacheEntry {
   hash: string
   timestamp: number
   filesWritten: string[]
+  mtime?: number
+  size?: number
 }
 
 interface CacheData {
@@ -93,6 +95,43 @@ export async function checkIngestCache(
 }
 
 /**
+ * Stat-based pre-check: returns cached file list if mtime+size match without
+ * reading the source file. Intended to skip expensive PDF extraction on re-ingest
+ * of an unchanged file. Falls back to null on any uncertainty.
+ */
+export async function quickCheckIngestCache(
+  projectPath: string,
+  sourceFileName: string,
+  sourcePath: string,
+): Promise<string[] | null> {
+  const cache = await loadCache(projectPath)
+  const entry = cache.entries[sourceFileName]
+  if (!entry || entry.mtime === undefined || entry.size === undefined) return null
+
+  try {
+    const [mtime, size] = await Promise.all([
+      getFileModifiedTime(sourcePath),
+      getFileSize(sourcePath),
+    ])
+    if (mtime !== entry.mtime || size !== entry.size) return null
+  } catch {
+    return null
+  }
+
+  const pp = normalizePath(projectPath)
+  for (const filePath of entry.filesWritten) {
+    const fullPath = isAbsolutePath(filePath) ? normalizePath(filePath) : `${pp}/${filePath}`
+    try {
+      if (!(await fileExists(fullPath))) return null
+    } catch {
+      return null
+    }
+  }
+
+  return entry.filesWritten
+}
+
+/**
  * Save ingest result to cache after successful ingest.
  */
 export async function saveIngestCache(
@@ -100,14 +139,28 @@ export async function saveIngestCache(
   sourceFileName: string,
   sourceContent: string,
   filesWritten: string[],
+  sourcePath?: string,
 ): Promise<void> {
   const cache = await loadCache(projectPath)
   const hash = await sha256(sourceContent)
   const newEntries = { ...cache.entries }
+  let mtime: number | undefined
+  let size: number | undefined
+  if (sourcePath) {
+    try {
+      ;[mtime, size] = await Promise.all([
+        getFileModifiedTime(sourcePath),
+        getFileSize(sourcePath),
+      ])
+    } catch {
+      // non-critical — stat fields will be absent, quick check falls back to full check
+    }
+  }
   newEntries[sourceFileName] = {
     hash,
     timestamp: Date.now(),
     filesWritten,
+    ...(mtime !== undefined && size !== undefined ? { mtime, size } : {}),
   }
   await saveCache(projectPath, { entries: newEntries })
 }

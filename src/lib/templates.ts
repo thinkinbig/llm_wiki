@@ -48,12 +48,14 @@ const BASE_INDEX_FORMAT = `\`wiki/index.md\` lists all pages grouped by type. Ea
 - [[page-slug]] — one-line description
 \`\`\``
 
-const BASE_LOG_FORMAT = `\`wiki/log.md\` records activity in reverse chronological order:
+const BASE_LOG_FORMAT = `\`wiki/log.md\` is append-only (newest entries at the end). Each entry:
 \`\`\`
-## YYYY-MM-DD
+## [YYYY-MM-DD] <action> | <short subject>
 
-- Action taken / finding noted
-\`\`\``
+Optional body lines (details).
+\`\`\`
+Actions include ingest, query, lint, delete, merge, research, manual, save, create.
+Recent entries: \`grep '^## \\[' wiki/log.md | tail -5\``
 
 const BASE_CROSSREF = `- Use \`[[page-slug]]\` syntax to link between wiki pages
 - Every entity and concept should appear in \`wiki/index.md\`

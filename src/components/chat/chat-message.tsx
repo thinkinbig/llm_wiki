@@ -18,6 +18,14 @@ import type { FileNode } from "@/types/wiki"
 import { convertLatexToUnicode } from "@/lib/latex-to-unicode"
 import { normalizePath, getFileName } from "@/lib/path-utils"
 import { makeQueryFileName } from "@/lib/wiki-filename"
+import {
+  WIKI_INDEX_PATH,
+  WIKI_LOG_PATH,
+  appendIndexEntry,
+  appendWikiLogContent,
+  formatIndexEntry,
+  formatLogEntry,
+} from "@/lib/wiki-structural"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
 import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-resolver"
@@ -191,39 +199,30 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
 
       await writeFile(filePath, frontmatter + cleanContent)
 
-      // Update index.md — append under ## Queries section
-      const indexPath = `${pp}/wiki/index.md`
+      const indexPath = `${pp}/${WIKI_INDEX_PATH}`
       let indexContent = ""
       try {
         indexContent = await readFile(indexPath)
       } catch {
-        indexContent = "# Wiki Index\n\n## Queries\n"
+        indexContent = "# Wiki Index\n"
       }
-      // The wikilink target is the filename WITHOUT the `.md`
-      // extension — must match `fileName` exactly (including the
-      // time suffix) or the link lands on a 404.
-      const linkTarget = fileName.replace(/\.md$/, "")
-      const entry = `- [[queries/${linkTarget}|${title}]]`
-      if (indexContent.includes("## Queries")) {
-        indexContent = indexContent.replace(
-          /(## Queries\n)/,
-          `$1${entry}\n`
-        )
-      } else {
-        indexContent = indexContent.trimEnd() + "\n\n## Queries\n" + entry + "\n"
-      }
+      const linkTarget = `queries/${fileName.replace(/\.md$/, "")}`
+      const entry = formatIndexEntry(linkTarget, "Saved from chat", { displayTitle: title })
+      indexContent = appendIndexEntry(indexContent, "Queries", entry)
       await writeFile(indexPath, indexContent)
 
-      // Append to log.md
-      const logPath = `${pp}/wiki/log.md`
+      const logPath = `${pp}/${WIKI_LOG_PATH}`
       let logContent = ""
       try {
         logContent = await readFile(logPath)
       } catch {
-        logContent = "# Wiki Log\n\n"
+        logContent = "# Wiki Log\n"
       }
-      const logEntry = `- ${date}: Saved query page \`${fileName}\`\n`
-      await writeFile(logPath, logContent.trimEnd() + "\n" + logEntry)
+      const logEntry = formatLogEntry("save", fileName, {
+        date,
+        body: `Saved query page from chat.`,
+      })
+      await writeFile(logPath, appendWikiLogContent(logContent, logEntry))
 
       // Refresh file tree and update graph
       const tree = await listDirectory(pp)

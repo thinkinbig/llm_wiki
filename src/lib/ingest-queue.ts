@@ -460,6 +460,13 @@ async function onQueueDrained(projectId: string, projectPath: string): Promise<v
   if (currentProjectId !== projectId) return
   processedSinceDrain = false
 
+  try {
+    const { reconcileWikiIndexProject } = await import("@/lib/index-reconcile")
+    await reconcileWikiIndexProject(projectPath)
+  } catch (err) {
+    console.error("[Ingest Queue] index reconcile failed:", err)
+  }
+
   sweepAbortController = new AbortController()
   const signal = sweepAbortController.signal
 
@@ -535,7 +542,10 @@ async function processNext(projectId: string): Promise<void> {
   lastWrittenFiles = []
 
   try {
-    const writtenFiles = await autoIngest(pp, fullSourcePath, llmConfig, currentAbortController.signal, next.folderContext)
+    const writtenFiles = await autoIngest(pp, fullSourcePath, llmConfig, currentAbortController.signal, {
+      folderContext: next.folderContext,
+      deferIndexReconcile: true,
+    })
     // Stale-context guard: project switched during the long LLM call.
     // Bail without mutating queue or writing to disk — pauseQueue has
     // already persisted the correct state to the old project's file,
