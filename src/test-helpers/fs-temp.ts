@@ -82,6 +82,14 @@ export const realFs = {
     throw new Error("openProject not supported in tests")
   },
   clipServerStatus: async (): Promise<string> => "ok",
+  fileExists: async (p: string): Promise<boolean> => {
+    try {
+      await fs.access(p)
+      return true
+    } catch {
+      return false
+    }
+  },
 }
 
 /**

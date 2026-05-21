@@ -20,7 +20,7 @@
  * next file in a batch, or surface to the user via toast).
  */
 import { deleteFile, listDirectory, readFile, writeFile } from "@/commands/fs"
-import { getFileStem, normalizePath } from "@/lib/path-utils"
+import { getFileStem, normalizePath, wikiPageIdFromPath } from "@/lib/path-utils"
 import { removeCatalogEntriesContent } from "@/lib/catalog-index"
 import { removePageEmbedding } from "@/lib/embedding"
 import {
@@ -71,9 +71,15 @@ export async function cascadeDeleteWikiPage(
   pagePath: string,
 ): Promise<void> {
   await deleteFile(pagePath)
-  const slug = getFileStem(pagePath)
-  if (slug.length > 0) {
-    await removePageEmbedding(projectPath, slug)
+  const pageId = wikiPageIdFromPath(pagePath)
+  const stem = getFileStem(pagePath)
+  const pageSegments = pageId.split("/").filter((s) => s.length > 0)
+  const pageBase = pageSegments[pageSegments.length - 1] ?? ""
+  if (
+    pageSegments.length > 0 &&
+    !["index", "log", "overview"].includes(pageBase)
+  ) {
+    await removePageEmbedding(projectPath, pageId)
   }
 
   // Media cascade: source-summary deletion → drop the source's
@@ -90,9 +96,9 @@ export async function cascadeDeleteWikiPage(
   // that resolves to a hidden directory under `wiki/media/`. The
   // worst case (slug == ".") would target `wiki/media/.` and delete
   // the entire media root.
-  if (isSourcePage(pagePath) && slug.length > 0 && !slug.startsWith(".")) {
+  if (isSourcePage(pagePath) && stem.length > 0 && !stem.startsWith(".")) {
     const pp = normalizePath(projectPath)
-    const mediaDir = `${pp}/wiki/media/${slug}`
+    const mediaDir = `${pp}/wiki/media/${stem}`
     try {
       // delete_file in fs.rs auto-detects directories and uses
       // remove_dir_all under the hood — see fs.rs L989. So a single

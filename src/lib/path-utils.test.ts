@@ -6,6 +6,7 @@ import {
   getFileStem,
   getRelativePath,
   isAbsolutePath,
+  wikiPageIdFromPath,
 } from "./path-utils"
 
 describe("normalizePath", () => {
@@ -115,6 +116,18 @@ describe("getRelativePath", () => {
     // '/projector' should NOT be considered a base of '/project...'
     // The impl adds '/' to base for matching, so this is handled.
     expect(getRelativePath("/projector/a", "/project")).toBe("/projector/a")
+  })
+})
+
+describe("wikiPageIdFromPath", () => {
+  it("returns folder-qualified id from absolute wiki paths", () => {
+    expect(wikiPageIdFromPath("/proj/wiki/entities/ntp.md")).toBe("entities/ntp")
+    expect(wikiPageIdFromPath("/proj/wiki/concepts/ntp.md")).toBe("concepts/ntp")
+  })
+
+  it("handles wiki-relative and backslash paths", () => {
+    expect(wikiPageIdFromPath("wiki/sources/rope-paper.md")).toBe("sources/rope-paper")
+    expect(wikiPageIdFromPath("C:\\proj\\wiki\\entities\\foo.md")).toBe("entities/foo")
   })
 })
 

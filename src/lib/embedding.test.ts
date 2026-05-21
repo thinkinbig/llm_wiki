@@ -1028,7 +1028,7 @@ describe("embedAllPages", () => {
     const upsertCalls = mockInvoke.mock.calls.filter((c) => c[0] === "vector_upsert_chunks")
     expect(upsertCalls).toHaveLength(2)
     const pageIds = upsertCalls.map((c) => (c[1] as { pageId: string }).pageId).sort()
-    expect(pageIds).toEqual(["attention", "rope"])
+    expect(pageIds).toEqual(["rope", "sub/attention"])
   })
 
   it("extracts the title from YAML frontmatter when present", async () => {

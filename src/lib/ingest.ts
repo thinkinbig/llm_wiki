@@ -6,7 +6,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { useChatStore } from "@/stores/chat-store"
 import { useActivityStore } from "@/stores/activity-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
-import { getFileName, normalizePath } from "@/lib/path-utils"
+import { getFileName, normalizePath, wikiPageIdFromPath } from "@/lib/path-utils"
 import type { FileNode } from "@/types/wiki"
 import { makeQuerySlug } from "@/lib/wiki-filename"
 import { checkIngestCache, saveIngestCache, quickCheckIngestCache } from "@/lib/ingest-cache"
@@ -1878,7 +1878,7 @@ async function autoIngestImpl(
     try {
       const { embedPage } = await import("@/lib/embedding")
       for (const wpath of writtenPaths) {
-        const pageId = wpath.split("/").pop()?.replace(/\.md$/, "") ?? ""
+        const pageId = wikiPageIdFromPath(wpath)
         if (!pageId || ["index", "log", "overview"].includes(pageId)) continue
         try {
           const content = await readFile(`${pp}/${wpath}`)
@@ -2206,8 +2206,9 @@ function collectMdSlugs(nodes: FileNode[]): string[] {
   for (const node of nodes) {
     if (node.is_dir && node.children) slugs.push(...collectMdSlugs(node.children))
     else if (!node.is_dir && node.name.endsWith(".md")) {
-      const id = node.name.replace(/\.md$/, "")
-      if (!STRUCTURAL_PAGE_IDS.has(id)) slugs.push(id)
+      const id = wikiPageIdFromPath(node.path)
+      const base = id.split("/").pop() ?? id
+      if (!STRUCTURAL_PAGE_IDS.has(id) && !STRUCTURAL_PAGE_IDS.has(base)) slugs.push(id)
     }
   }
   return slugs
@@ -2857,7 +2858,7 @@ async function reembedSourceSummary(pp: string, fileName: string): Promise<void>
     )
     const title = titleMatch ? titleMatch[1].trim() : sourceBaseName
     const { embedPage } = await import("@/lib/embedding")
-    await embedPage(pp, sourceBaseName, title, content, embCfg)
+    await embedPage(pp, `sources/${sourceBaseName}`, title, content, embCfg)
     console.log(`[ingest:caption] re-embedded ${sourceBaseName} with captioned alt text`)
   } catch (err) {
     console.warn(

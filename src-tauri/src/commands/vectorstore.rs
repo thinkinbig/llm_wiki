@@ -56,10 +56,10 @@ fn validate_page_id(page_id: &str) -> Result<(), String> {
     if page_id.is_empty() || page_id.len() > 256 {
         return Err("Invalid page_id: empty or too long".to_string());
     }
-    // Only allow alphanumeric, hyphens, underscores, dots
+    // Folder-qualified ids (e.g. entities/ntp) use slashes
     if !page_id
         .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
     {
         return Err(format!(
             "Invalid page_id: contains disallowed characters: {}",
@@ -332,7 +332,7 @@ fn validate_page_id_for_v2(page_id: &str) -> Result<(), String> {
     }
     if !page_id
         .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
     {
         return Err(format!(
             "Invalid page_id: contains disallowed characters: {}",

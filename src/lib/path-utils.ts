@@ -46,6 +46,25 @@ export function getRelativePath(fullPath: string, basePath: string): string {
 }
 
 /**
+ * Canonical LanceDB / vector `page_id` for a wiki markdown file.
+ * Folder-qualified (e.g. `entities/ntp`), matching wikilink targets.
+ */
+export function wikiPageIdFromPath(pagePath: string): string {
+  const normalized = normalizePath(pagePath)
+  const wikiMarker = "/wiki/"
+  const idx = normalized.indexOf(wikiMarker)
+  let rel: string
+  if (idx >= 0) {
+    rel = normalized.slice(idx + wikiMarker.length)
+  } else if (normalized.startsWith("wiki/")) {
+    rel = normalized.slice("wiki/".length)
+  } else {
+    rel = normalized
+  }
+  return rel.replace(/\.md$/i, "")
+}
+
+/**
  * Cross-platform absolute-path detection.
  *
  * Unix:     "/foo/bar"

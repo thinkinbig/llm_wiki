@@ -1,6 +1,6 @@
 import { readFile, listDirectory } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
-import { normalizePath } from "@/lib/path-utils"
+import { getRelativePath, normalizePath } from "@/lib/path-utils"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,9 +66,6 @@ function flattenMdFiles(nodes: readonly FileNode[]): FileNode[] {
   return files
 }
 
-function fileNameToId(fileName: string): string {
-  return fileName.replace(/\.md$/, "")
-}
 
 function parseYamlArray(fm: string, field: string): string[] {
   const results: string[] = []
@@ -187,7 +184,7 @@ export async function buildRetrievalGraph(
   }> = []
 
   for (const file of mdFiles) {
-    const id = fileNameToId(file.name)
+    const id = getRelativePath(file.path, wikiRoot).replace(/\.md$/i, "")
     let content = ""
     try {
       content = await readFile(file.path)

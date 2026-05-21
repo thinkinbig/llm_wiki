@@ -14,7 +14,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { useWikiStore } from "@/stores/wiki-store"
-import { writeFile, readFile, listDirectory, deleteFile } from "@/commands/fs"
+import { writeFile, readFile, listDirectory } from "@/commands/fs"
+import { cascadeDeleteWikiPagesWithRefs } from "@/lib/wiki-page-delete"
 import { normalizePath } from "@/lib/path-utils"
 import { hasConfiguredSearchProvider } from "@/lib/web-search"
 import { sectionForCatalogPage, updateCatalogIndex } from "@/lib/catalog-index"
@@ -131,10 +132,9 @@ export function ReviewView() {
       }
       resolveItem(id, action)
     } else if (action.startsWith("delete:") && project) {
-      // Delete a file
       const filePath = action.slice(7)
       try {
-        await deleteFile(filePath)
+        await cascadeDeleteWikiPagesWithRefs(pp, [filePath])
         const tree = await listDirectory(pp)
         setFileTree(tree)
         resolveItem(id, "Deleted")

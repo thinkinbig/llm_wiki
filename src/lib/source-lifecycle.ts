@@ -12,7 +12,7 @@ import type { WikiProject, FileNode } from "@/types/wiki"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { enqueueBatch } from "@/lib/ingest-queue"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
-import { getFileName, getFileStem, normalizePath } from "@/lib/path-utils"
+import { getFileName, getFileStem, normalizePath, wikiPageIdFromPath } from "@/lib/path-utils"
 import {
   parseFrontmatterArray,
   parseSources,
@@ -309,10 +309,15 @@ export async function cleanupDeletedWikiPages(
 
   if (deletedInfos.length === 0) return
 
-  for (const info of deletedInfos) {
-    await removePageEmbedding(pp, info.slug)
+  for (const relPath of relativePaths) {
+    const pageId = wikiPageIdFromPath(relPath)
+    if (pageId.length > 0 && !pageId.startsWith(".")) {
+      await removePageEmbedding(pp, pageId)
+    }
+    const stem = getFileStem(relPath)
+    if (!stem.length || stem.startsWith(".")) continue
     try {
-      await deleteFile(`${pp}/wiki/media/${info.slug}`)
+      await deleteFile(`${pp}/wiki/media/${stem}`)
     } catch {
       // only source-summary pages usually own media; absence is normal
     }
