@@ -11,7 +11,7 @@ import { executeIngestWrites } from "@/lib/ingest"
 import { listDirectory, readFile, deleteFile } from "@/commands/fs"
 import { searchWiki } from "@/lib/search"
 import { buildRetrievalGraph, getRelatedNodes } from "@/lib/graph-relevance"
-import { normalizePath, getFileName, getRelativePath } from "@/lib/path-utils"
+import { normalizePath, getRelativePath, wikiPageIdFromPath } from "@/lib/path-utils"
 import { getOutputLanguage, buildLanguageReminder } from "@/lib/output-language"
 import { isGreeting } from "@/lib/greeting-detector"
 import { computeContextBudget } from "@/lib/context-budget"
@@ -249,8 +249,7 @@ export function ChatPanel() {
         const graphExpansions: { title: string; path: string; relevance: number }[] = []
 
         for (const result of topSearchResults) {
-          const fileName = getFileName(result.path)
-          const nodeId = fileName.replace(/\.md$/, "")
+          const nodeId = wikiPageIdFromPath(result.path)
           const related = getRelatedNodes(nodeId, graph, 3)
           for (const { node, relevance } of related) {
             if (relevance < 2.0) continue

@@ -8,7 +8,7 @@ export interface ReviewOption {
 
 export interface ReviewItem {
   id: string
-  type: "contradiction" | "duplicate" | "missing-page" | "confirm" | "suggestion"
+  type: "contradiction" | "duplicate" | "missing-page" | "confirm" | "suggestion" | "schema-violation"
   title: string
   description: string
   sourcePath?: string

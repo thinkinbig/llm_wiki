@@ -52,6 +52,14 @@ _Avoid_: chat ingest (informal only), partial ingest
 A markdown file under `wiki/` that represents one piece of knowledge (entity, concept, source summary, index, etc.).
 _Avoid_: node, document (unless talking about the original PDF/markdown source file)
 
+**Wiki ontology**:
+The machine-readable page-type contract for a project, stored at `.llm-wiki/ontology.json`. It defines content page types (via layered inheritance from a built-in `base` profile), per-type directory and frontmatter rules, and structural file paths. It is the canonical source for write-time validation; `schema.md` is the human- and LLM-facing view generated from it at project creation. See [ADR 0006](docs/adr/0006-wiki-ontology-lite-governance.md).
+_Avoid_: schema (when you mean the machine contract), ontology file (too vague)
+
+**Page registry**:
+A materialized index at `.llm-wiki/page-registry.json` mapping folder-qualified **page id** → `{ type, relPath, title, updatedAt }`. Rebuilt from filesystem scans on bootstrap and external file changes; incrementally updated on app writes. Used for fast validation and catalog operations; filesystem + frontmatter remain authoritative for page existence. Structural files (`index.md`, `log.md`, `overview.md`) are excluded. See [ADR 0006](docs/adr/0006-wiki-ontology-lite-governance.md).
+_Avoid_: project registry (that is UUID → path in app state), catalog (collides with `wiki/index.md`)
+
 **Page id**:
 The canonical identifier for a page — the filename without `.md` (e.g. `apache-spark` for `wiki/entities/apache-spark.md`). Always produced by `pageId(name)`: hyphenated, lower-cased, with heuristic word-boundary splitting.
 _Avoid_: slug (in conversation OK; in glossary prefer **page id**), filename
@@ -95,6 +103,8 @@ _Avoid_: warning, lint issue
 - Every **page reference** should eventually target exactly one **page id**; until then it is **unresolved**
 - **Reference resolution** (policy): after ingest, rewrite shorthand targets to **page id** when the match is unique; leave **unresolved** references unchanged and queue a **Review**; the knowledge graph draws only **resolved page references**
 - The knowledge graph visualizes **resolved page references** between **pages** — not a separate "link type" per syntax
+- **Wiki ontology** governs content **page** types; **page references** remain untyped per [ADR 0002](docs/adr/0002-page-reference-unification.md)
+- **Page registry** is a derived index over content **pages**, not a second object store
 
 ## Example dialogue
 

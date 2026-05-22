@@ -1,6 +1,7 @@
 import { webSearch } from "./web-search"
 import { streamChat } from "./llm-client"
 import { autoIngest } from "./ingest"
+import { writeGovernedWikiPage } from "@/lib/wiki-page-write-governance"
 import { writeFile, readFile, listDirectory } from "@/commands/fs"
 import { useWikiStore, type LlmConfig, type SearchApiConfig } from "@/stores/wiki-store"
 import { useResearchStore } from "@/stores/research-store"
@@ -199,8 +200,12 @@ async function executeResearch(
       "",
     ].join("\n")
 
-    await writeFile(filePath, pageContent)
-    const savedPath = `wiki/queries/${fileName}`
+    const relPath = `wiki/queries/${fileName}`
+    const writeResult = await writeGovernedWikiPage(pp, relPath, pageContent)
+    if (!writeResult.ok) {
+      throw new Error("Schema violation blocked research page write")
+    }
+    const savedPath = relPath
 
     useResearchStore.getState().updateTask(taskId, {
       status: "done",

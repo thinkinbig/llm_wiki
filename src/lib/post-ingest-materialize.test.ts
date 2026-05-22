@@ -10,6 +10,7 @@ vi.mock("@/commands/fs", () => ({
   listDirectory: vi.fn(),
   readFile: vi.fn(),
   writeFile: vi.fn(),
+  fileExists: vi.fn().mockResolvedValue(true),
 }))
 
 import { listDirectory, readFile, writeFile } from "@/commands/fs"
@@ -159,7 +160,7 @@ describe("materializeManifestPages", () => {
 
     await materializeManifestPages("/p", [{ name: "Ion Stoica", type: "entity" }], "new-paper.pdf", [])
 
-    expect(mockWriteFile).toHaveBeenCalledTimes(1)
+    expect(mockWriteFile).toHaveBeenCalledTimes(2)
     expect(mockWriteFile).toHaveBeenCalledWith(
       "/p/wiki/entities/ion-stoica.md",
       expect.stringContaining('sources: ["old-paper.pdf", "new-paper.pdf"]'),

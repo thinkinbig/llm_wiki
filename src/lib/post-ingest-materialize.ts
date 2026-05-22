@@ -1,4 +1,5 @@
-import { listDirectory, readFile, writeFile } from "@/commands/fs"
+import { listDirectory, readFile } from "@/commands/fs"
+import { writeWikiPagePatch } from "@/lib/wiki-page-write-governance"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { normalizePath } from "@/lib/path-utils"
 import { ensureSourcesInContent } from "@/lib/sources-merge"
@@ -47,7 +48,7 @@ export async function materializeManifestPages(
       const existing = await readFile(`${pp}/${relPath}`)
       const compensated = ensureSourcesInContent(existing, sourceFileName)
       if (compensated !== existing) {
-        await writeFile(`${pp}/${relPath}`, compensated)
+        await writeWikiPagePatch(pp, relPath, compensated)
       }
     } catch {
       // Non-fatal — page may have been deleted between list and read.

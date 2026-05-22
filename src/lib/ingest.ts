@@ -34,7 +34,10 @@ import {
 } from "@/lib/wiki-structural"
 import { mergePageContent, type MergeFn } from "@/lib/page-merge"
 import { runDedupPass } from "@/lib/dedup-runner"
-import { canonicalizeContentPage } from "@/lib/wiki-content-page"
+import {
+  prepareGovernedWikiWrite,
+  registerWrittenWikiPage,
+} from "@/lib/wiki-page-write-governance"
 import { ensureSourcesInContent } from "@/lib/sources-merge"
 import {
   normalizePageReferencesOnWrite,
@@ -2133,21 +2136,41 @@ async function writeFileBlocks(
         // wholesale — their sources field is incidental and merging
         // wouldn't make semantic sense (they aren't source-derived
         // content pages).
-        await writeFile(fullPath, content)
+        const overviewPrepared = await prepareGovernedWikiWrite(
+          ctx.projectPath,
+          relativePath,
+          content,
+          { sourcePath: ctx.sourceFileName, canonicalize: false },
+        )
+        if (overviewPrepared.blocked) {
+          const msg = `Skipped "${relativePath}" — schema violation.`
+          console.warn(`[ingest] ${msg}`)
+          warnings.push(msg)
+          continue
+        }
+        await writeFile(fullPath, overviewPrepared.content)
       } else {
         // ADR 0003 Tier A chokepoint: re-derive the page id from the
         // title and re-serialize frontmatter canonically before any
         // existing-page lookup or merge, so MapReduce / map-reduce /
         // mapreduce all resolve to one path.
-        const canonical = canonicalizeContentPage(relativePath, content)
-        const canonRelPath = canonical.relativePath
+        const prepared = await prepareGovernedWikiWrite(
+          ctx.projectPath,
+          relativePath,
+          content,
+          { sourcePath: ctx.sourceFileName },
+        )
+        const canonRelPath = prepared.relativePath
         const canonFullPath = `${ctx.projectPath}/${canonRelPath}`
-        content = canonical.content
-        // ADR 0003 Tier A: never write an entity/concept page with an
-        // empty body. Skipping leaves it missing on disk, so Catch-up
-        // regenerates it — that retry path needs no extra machinery.
-        if (canonical.isContentPage && canonical.bodyEmpty) {
+        content = prepared.content
+        if (prepared.violations.some((v) => v.code === "empty-body")) {
           const msg = `Skipped "${canonRelPath}" — generated page has an empty body; left for Catch-up.`
+          console.warn(`[ingest] ${msg}`)
+          warnings.push(msg)
+          continue
+        }
+        if (prepared.blocked) {
+          const msg = `Skipped "${canonRelPath}" — schema violation (${prepared.violations.map((v) => v.code).join(", ")}).`
           console.warn(`[ingest] ${msg}`)
           warnings.push(msg)
           continue
@@ -2160,6 +2183,7 @@ async function writeFileBlocks(
             toWrite = normalizePageReferencesOnWrite(toWrite, knownPageIds)
           }
           await writeFile(canonFullPath, toWrite)
+          await registerWrittenWikiPage(ctx.projectPath, canonRelPath, toWrite)
         } else {
         // Content pages (entities / concepts / queries / synthesis /
         // comparisons / sources summaries): if a page with this
@@ -2192,6 +2216,7 @@ async function writeFileBlocks(
           toWrite = normalizePageReferencesOnWrite(toWrite, knownPageIds)
         }
         await writeFile(canonFullPath, toWrite)
+        await registerWrittenWikiPage(ctx.projectPath, canonRelPath, toWrite)
         }
         writtenPaths.push(canonRelPath)
         continue
@@ -2223,7 +2248,7 @@ function parseReviewBlocks(
     const body = match[3].trim()
 
     const type = (
-      ["contradiction", "duplicate", "missing-page", "suggestion"].includes(rawType)
+      ["contradiction", "duplicate", "missing-page", "suggestion", "schema-violation"].includes(rawType)
         ? rawType
         : "confirm"
     ) as ReviewItem["type"]
@@ -3148,8 +3173,21 @@ export async function executeIngestWrites(
         await updateCatalogIndex(pp, { kind: "replace", content })
         writtenPaths.push(WIKI_INDEX_PATH)
       } else {
-        await writeFile(fullPath, content)
-        writtenPaths.push(relativePath)
+        const manualPrepared = await prepareGovernedWikiWrite(
+          pp,
+          relativePath,
+          content,
+          { sourcePath: store.ingestSource ?? undefined },
+        )
+        if (manualPrepared.blocked) {
+          console.warn(`[ingest] Skipped manual save "${relativePath}" — schema violation.`)
+          continue
+        }
+        await writeFile(`${pp}/${manualPrepared.relativePath}`, manualPrepared.content)
+        if (manualPrepared.relativePath.startsWith("wiki/")) {
+          await registerWrittenWikiPage(pp, manualPrepared.relativePath, manualPrepared.content)
+        }
+        writtenPaths.push(manualPrepared.relativePath)
       }
     } catch (err) {
       console.error(`Failed to write ${fullPath}:`, err)
