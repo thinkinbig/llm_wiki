@@ -85,11 +85,14 @@ export async function fetchEmbedding(
   if (!cfg.endpoint) return null
 
   const isGoogleNative = isGoogleEmbeddingConfig(cfg)
+  const isAzure = isAzureEmbeddingConfig(cfg)
   const endpoint = isGoogleNative ? googleEmbeddingEndpoint(cfg) : cfg.endpoint
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (cfg.apiKey) {
     if (isGoogleNative) {
       headers["x-goog-api-key"] = cfg.apiKey
+    } else if (isAzure) {
+      headers["api-key"] = cfg.apiKey
     } else {
       headers.Authorization = `Bearer ${cfg.apiKey}`
     }
@@ -179,6 +182,10 @@ function isNonEmptyNumberArray(value: unknown): value is number[] {
   return Array.isArray(value)
     && value.length > 0
     && value.every((item) => typeof item === "number" && Number.isFinite(item))
+}
+
+function isAzureEmbeddingConfig(cfg: EmbeddingConfig): boolean {
+  return cfg.endpoint.toLowerCase().includes(".openai.azure.com")
 }
 
 function isGoogleEmbeddingConfig(cfg: EmbeddingConfig): boolean {

@@ -676,6 +676,8 @@ async fn fetch_embedding(text: &str, cfg: &SearchEmbeddingConfig) -> Result<Vec<
     if !cfg.api_key.trim().is_empty() {
         if is_google {
             req = req.header("x-goog-api-key", cfg.api_key.trim());
+        } else if cfg.endpoint.to_lowercase().contains(".openai.azure.com") {
+            req = req.header("api-key", cfg.api_key.trim());
         } else {
             req = req.bearer_auth(cfg.api_key.trim());
         }
