@@ -5,13 +5,71 @@ import type { FileNode } from "@/types/wiki"
 import { useActivityStore } from "@/stores/activity-store"
 import { getFileName, getRelativePath, normalizePath } from "@/lib/path-utils"
 import { buildLanguageDirective } from "@/lib/output-language"
+import {
+  auditWikiPages,
+  loadWikiAuditPages,
+  pageFromAuditDetail,
+  resolveWikiRoot,
+  WIKI_AUDIT_PATTERN_SEVERITY,
+  type WikiAuditFs,
+} from "@/lib/wiki-audit"
+
+export type LintResultType =
+  | "orphan"
+  | "broken-link"
+  | "no-outlinks"
+  | "semantic"
+  | "wiki-audit"
 
 export interface LintResult {
-  type: "orphan" | "broken-link" | "no-outlinks" | "semantic"
+  type: LintResultType
   severity: "warning" | "info"
   page: string
   detail: string
+  /** WIKI-* pattern id when type is wiki-audit */
+  code?: string
   affectedPages?: string[]
+}
+
+const tauriWikiAuditFs: WikiAuditFs = {
+  readdir: async (dir) => {
+    const nodes = await listDirectory(dir)
+    return nodes.map((n) => n.name)
+  },
+  readFile,
+}
+
+function isAuditScopedPage(rel: string): boolean {
+  return rel.startsWith("concepts/") || rel.startsWith("entities/")
+}
+
+function findingsToLintResults(
+  findings: Record<string, { id: string; detail: string }[]>,
+): LintResult[] {
+  const out: LintResult[] = []
+  for (const list of Object.values(findings)) {
+    for (const f of list) {
+      if (f.detail.length === 0) continue
+      out.push({
+        type: "wiki-audit",
+        code: f.id,
+        severity: WIKI_AUDIT_PATTERN_SEVERITY[f.id] ?? "warning",
+        page: pageFromAuditDetail(f.detail),
+        detail: f.detail,
+      })
+    }
+  }
+  return out
+}
+
+/** Defect detectors for wiki/concepts + wiki/entities (eval wiki-defect-patterns). */
+export async function runWikiAuditLint(projectPath: string): Promise<LintResult[]> {
+  const pp = normalizePath(projectPath)
+  const wikiRoot = await resolveWikiRoot(pp, tauriWikiAuditFs)
+  const pages = await loadWikiAuditPages(wikiRoot, tauriWikiAuditFs)
+  if (pages.length === 0) return []
+  const findings = await auditWikiPages(pages, wikiRoot, tauriWikiAuditFs)
+  return findingsToLintResults(findings)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -137,23 +195,26 @@ export async function runStructuralLint(projectPath: string): Promise<LintResult
       })
     }
 
-    // Broken links — case-insensitive matching.
-    for (const link of p.outlinks) {
-      const lookup = link.toLowerCase()
-      const basename = getFileName(link).replace(/\.md$/, "").toLowerCase()
-      const exists = slugMap.has(lookup) || slugMap.has(basename)
-      if (!exists) {
-        results.push({
-          type: "broken-link",
-          severity: "warning",
-          page: shortName,
-          detail: `Broken link: [[${link}]] — target page not found.`,
-        })
+    // Broken links — concepts/entities use wiki-audit (richer WIKI-LINK-* checks).
+    if (!isAuditScopedPage(shortName)) {
+      for (const link of p.outlinks) {
+        const lookup = link.toLowerCase()
+        const basename = getFileName(link).replace(/\.md$/, "").toLowerCase()
+        const exists = slugMap.has(lookup) || slugMap.has(basename)
+        if (!exists) {
+          results.push({
+            type: "broken-link",
+            severity: "warning",
+            page: shortName,
+            detail: `Broken link: [[${link}]] — target page not found.`,
+          })
+        }
       }
     }
   }
 
-  return results
+  const audit = await runWikiAuditLint(projectPath)
+  return [...results, ...audit]
 }
 
 // ── Semantic lint ─────────────────────────────────────────────────────────────

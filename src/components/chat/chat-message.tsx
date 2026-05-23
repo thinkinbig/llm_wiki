@@ -11,6 +11,7 @@ import {
 } from "lucide-react"
 import { useWikiStore } from "@/stores/wiki-store"
 import { readFile, writeFile, listDirectory } from "@/commands/fs"
+import { writeGovernedWikiPage } from "@/lib/wiki-page-write-governance"
 import { lastQueryPages } from "@/components/chat/chat-panel"
 import type { DisplayMessage } from "@/stores/chat-store"
 import type { FileNode } from "@/types/wiki"
@@ -178,6 +179,7 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
       const title = firstLine.slice(0, 60) || "Saved Query"
       const { date, fileName } = makeQueryFileName(title)
       const filePath = `${pp}/wiki/queries/${fileName}`
+      const relPath = `wiki/queries/${fileName}`
 
       // Strip hidden sources comment and thinking blocks from content
       const cleanContent = content
@@ -193,7 +195,11 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
         cleanContent,
       )
 
-      await writeFile(filePath, fileContent)
+      const writeResult = await writeGovernedWikiPage(pp, relPath, fileContent)
+      if (!writeResult.ok) {
+        console.error("Failed to save to wiki: schema violation blocked write")
+        return
+      }
 
       const linkTarget = `queries/${fileName.replace(/\.md$/, "")}`
       await updateCatalogIndex(pp, {

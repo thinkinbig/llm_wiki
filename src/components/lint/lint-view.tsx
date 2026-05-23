@@ -5,6 +5,7 @@ import {
   ArrowUpRight,
   AlertTriangle,
   Info,
+  FileWarning,
   RefreshCw,
   CheckCircle2,
   BrainCircuit,
@@ -36,6 +37,7 @@ export function LintView() {
     "broken-link": { icon: Link2Off, label: t("lint.typeLabels.broken-link") },
     "no-outlinks": { icon: ArrowUpRight, label: t("lint.typeLabels.no-outlinks") },
     semantic: { icon: BrainCircuit, label: t("lint.typeLabels.semantic") },
+    "wiki-audit": { icon: FileWarning, label: t("lint.typeLabels.wiki-audit") },
   }), [t])
 
   const [results, setResults] = useState<LintResult[]>([])
@@ -114,7 +116,8 @@ export function LintView() {
           break
         }
 
-        case "broken-link": {
+        case "broken-link":
+        case "wiki-audit": {
           // Option: remove the broken link from the page, or send to Review for manual fix
           const pagePath = `${pp}/wiki/${result.page}`
           useReviewStore.getState().addItem({
@@ -348,7 +351,9 @@ function LintCard({
         />
         <div className="flex-1 min-w-0">
           <div className="font-medium truncate">{result.page}</div>
-          <div className="text-[11px] text-muted-foreground">{config.label}</div>
+          <div className="text-[11px] text-muted-foreground">
+            {result.code ? `${config.label} · ${result.code}` : config.label}
+          </div>
         </div>
       </div>
 

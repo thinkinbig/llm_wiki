@@ -16,6 +16,7 @@ const typeArb = fc.constantFrom<ReviewItem["type"]>(
   "missing-page",
   "confirm",
   "suggestion",
+  "schema-violation",
 )
 
 const reviewInputArb = fc.record({

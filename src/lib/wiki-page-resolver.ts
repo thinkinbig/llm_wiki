@@ -107,6 +107,14 @@ export function resolveWikiSlugId(
   })
   if (prefixMatches.length === 1) return prefixMatches[0]
 
+  // Handle folder-qualified IDs (e.g. "entities/concept"): match against the
+  // last path segment so bare wikilinks like [[concept]] resolve correctly.
+  const lastSegmentMatches = ids.filter((id) => {
+    const segment = id.includes("/") ? id.split("/").pop()! : id
+    return segment.toLowerCase().replace(/\s+/g, "-") === normalized
+  })
+  if (lastSegmentMatches.length === 1) return lastSegmentMatches[0]
+
   return null
 }
 

@@ -1,0 +1,1 @@
+{"nodes": [], "edges": [{"source": "lib_detect_language_property_test_lang", "target": "lib_detect_language_detectlanguage", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/lib/detect-language.property.test.ts", "source_location": "16:16", "weight": 1.0}], "hyperedges": []}

@@ -144,6 +144,14 @@ async function refreshAfterFileChanges(project: WikiProject, relativePaths: stri
   const pp = normalizePath(project.path)
   const store = useWikiStore.getState()
   try {
+    const { reconcileWikiGovernanceAfterExternalChanges } = await import(
+      "@/lib/wiki-ontology-bootstrap"
+    )
+    await reconcileWikiGovernanceAfterExternalChanges(pp, relativePaths)
+  } catch (err) {
+    console.warn("[file-sync] failed to reconcile wiki governance:", err)
+  }
+  try {
     const tree = await listDirectory(pp)
     useWikiStore.getState().setFileTree(tree)
   } catch (err) {

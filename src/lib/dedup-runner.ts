@@ -5,6 +5,11 @@
  * the algorithm core stays testable without mocks of all that.
  */
 import { listDirectory, readFile, writeFile, deleteFile } from "@/commands/fs"
+import {
+  removePageRegistryEntry,
+  wikiLinkTargetFromRelPath,
+} from "@/lib/page-registry"
+import { registerWrittenWikiPage } from "@/lib/wiki-page-write-governance"
 import { streamChat } from "@/lib/llm-client"
 import { normalizePath, wikiPageIdFromPath } from "@/lib/path-utils"
 import type { EmbeddingConfig, LlmConfig } from "@/stores/wiki-store"
@@ -223,16 +228,19 @@ export async function executeMerge(
 
   // 3. Write canonical
   await writeFile(`${pp}/${result.canonicalPath}`, result.canonicalContent)
+  await registerWrittenWikiPage(pp, result.canonicalPath, result.canonicalContent)
 
   // 4. Apply rewrites
   for (const r of result.rewrites) {
     await writeFile(`${pp}/${r.path}`, r.newContent)
+    await registerWrittenWikiPage(pp, r.path, r.newContent)
   }
 
   // 5. Delete merged-away pages
   for (const dead of result.pagesToDelete) {
     try {
       await deleteFile(`${pp}/${dead}`)
+      await removePageRegistryEntry(pp, wikiLinkTargetFromRelPath(dead))
     } catch (err) {
       // Surface as a warning — backup is still safe.
       console.warn(`[dedup] failed to delete ${dead}: ${err}`)

@@ -10,11 +10,13 @@ import {
   X,
   Check,
   Trash2,
+  FileWarning,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { writeFile, readFile, listDirectory } from "@/commands/fs"
+import { writeGovernedWikiPage } from "@/lib/wiki-page-write-governance"
 import { cascadeDeleteWikiPagesWithRefs } from "@/lib/wiki-page-delete"
 import {
   buildDeletedKeys,
@@ -37,6 +39,7 @@ const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; label
   "missing-page": { icon: FileQuestion, label: "Missing Page", color: "text-purple-500" },
   confirm: { icon: MessageSquare, label: "Needs Confirmation", color: "text-foreground" },
   suggestion: { icon: Lightbulb, label: "Suggestion", color: "text-emerald-500" },
+  "schema-violation": { icon: FileWarning, label: "Schema Violation", color: "text-orange-500" },
 }
 
 export function ReviewView() {
@@ -88,9 +91,14 @@ export function ReviewView() {
         const date = new Date().toISOString().slice(0, 10)
         const fileName = `${slug}-${date}.md`
         const filePath = `${pp}/wiki/queries/${fileName}`
+        const relPath = `wiki/queries/${fileName}`
 
         const frontmatter = `---\ntype: query\ntitle: "${title.replace(/"/g, '\\"')}"\ncreated: ${date}\ntags: []\n---\n\n`
-        await writeFile(filePath, frontmatter + cleanContent)
+        const writeResult = await writeGovernedWikiPage(pp, relPath, frontmatter + cleanContent)
+        if (!writeResult.ok) {
+          resolveItem(id, "Save blocked (schema)")
+          return
+        }
 
         await updateCatalogIndex(pp, {
           kind: "append",
@@ -190,11 +198,15 @@ export function ReviewView() {
           const pageType = detectPageType(realAction, item.type)
           const dir = pageType === "query" ? "queries" : pageType === "entity" ? "entities" : pageType === "concept" ? "concepts" : "queries"
           const fileName = `${slug}-${date}.md`
-          const filePath = `${pp}/wiki/${dir}/${fileName}`
+          const relPath = `wiki/${dir}/${fileName}`
 
           const frontmatter = `---\ntype: ${pageType}\ntitle: "${title.replace(/"/g, '\\"')}"\ncreated: ${date}\ntags: []\nrelated: []\n---\n\n`
           const body = `# ${title}\n\n${item.description}\n`
-          await writeFile(filePath, frontmatter + body)
+          const writeResult = await writeGovernedWikiPage(pp, relPath, frontmatter + body)
+          if (!writeResult.ok) {
+            resolveItem(id, "Create blocked (schema)")
+            return
+          }
 
           await updateCatalogIndex(pp, {
             kind: "append",
@@ -253,10 +265,12 @@ export function ReviewView() {
         setFileTree(tree)
       }
       resolveItem(id, "Skipped")
+    } else if (action === "dismiss") {
+      dismissItem(id)
     } else {
       resolveItem(id, action)
     }
-  }, [project, items, resolveItem, setFileTree])
+  }, [project, items, resolveItem, dismissItem, setFileTree])
 
   const pending = items.filter((i) => !i.resolved)
   const resolved = items.filter((i) => i.resolved)

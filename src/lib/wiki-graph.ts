@@ -1,7 +1,7 @@
 import { readFile, listDirectory } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { buildRetrievalGraph, calculateRelevance } from "./graph-relevance"
-import { normalizePath } from "@/lib/path-utils"
+import { normalizePath, getRelativePath } from "@/lib/path-utils"
 import { parseFrontmatterArray } from "@/lib/sources-merge"
 import { resolveWikiSlugId, unwrapWikilink } from "@/lib/wiki-page-resolver"
 import Graph from "graphology"
@@ -162,10 +162,6 @@ function extractLinkTargets(content: string): string[] {
   return [...extractWikilinks(content), ...extractRelatedTargets(content)]
 }
 
-function fileNameToId(fileName: string): string {
-  return fileName.replace(/\.md$/, "")
-}
-
 export async function buildWikiGraph(
   projectPath: string,
 ): Promise<{ nodes: GraphNode[]; edges: GraphEdge[]; communities: CommunityInfo[] }> {
@@ -190,7 +186,10 @@ export async function buildWikiGraph(
   >()
 
   for (const file of mdFiles) {
-    const id = fileNameToId(file.name)
+    // Use folder-qualified IDs (e.g. "entities/concept") matching the retrieval
+    // graph and the rest of the LanceDB/vector system — avoids the ID mismatch
+    // that caused relevance weights to stay at 1.
+    const id = getRelativePath(file.path, wikiRoot).replace(/\.md$/i, "")
     let content = ""
     try {
       content = await readFile(file.path)

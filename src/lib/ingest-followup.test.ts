@@ -8,6 +8,7 @@ vi.mock("@/commands/fs", () => ({
   listDirectory: vi.fn(),
   readFile: vi.fn(),
   writeFile: vi.fn(),
+  fileExists: vi.fn().mockResolvedValue(false),
 }))
 
 vi.mock("@/lib/wiki-page-resolver", async (importOriginal) => {
