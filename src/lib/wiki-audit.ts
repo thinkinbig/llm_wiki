@@ -234,7 +234,14 @@ export async function auditWikiPages(
 
     if (page.title) {
       const fromTitle = slugifyTitle(page.title)
-      if (fromTitle && fromTitle !== page.slug) {
+      // pageId can hyphenate acronyms differently than ingest filenames
+      // (e.g. "2PC" → pageId "…-2-pc" vs slug "…-2pc"). dedupKey is the
+      // orthographic identity — same key means title and slug agree.
+      if (
+        fromTitle &&
+        fromTitle !== page.slug &&
+        dedupKey(fromTitle) !== dedupKey(page.slug)
+      ) {
         const titleTokens = new Set(fromTitle.split("-"))
         const slugTokens = page.slug.split("-")
         const extra = slugTokens.filter((t) => !titleTokens.has(t))

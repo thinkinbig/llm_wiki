@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect, useMemo } from "react"
 import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
-import remarkMath from "remark-math"
-import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
+import {
+  chatMarkdownRemarkPlugins,
+  markdownRehypePlugins,
+  prepareMarkdownForRender,
+} from "@/lib/markdown-render"
 import {
   Search, Loader2, CheckCircle2, AlertCircle, ChevronRight, ChevronDown, X,
   FileText, Send,
@@ -124,6 +126,10 @@ function SynthesisBlock({ synthesis, isStreaming }: { synthesis: string; isStrea
   const scrollRef = useRef<HTMLDivElement>(null)
   const { thinking, answer } = useMemo(() => separateThinking(synthesis), [synthesis])
   const renderLanguage = useMemo(() => detectLanguage(answer || synthesis), [answer, synthesis])
+  const renderAnswer = useMemo(
+    () => (answer ? prepareMarkdownForRender(answer) : ""),
+    [answer],
+  )
   const direction = getTextDirection(renderLanguage)
   const htmlLang = getHtmlLang(renderLanguage)
   const [thinkingCollapsed, setThinkingCollapsed] = useState(false)
@@ -147,7 +153,7 @@ function SynthesisBlock({ synthesis, isStreaming }: { synthesis: string; isStrea
       <div className="mb-1 font-medium text-muted-foreground">Synthesis</div>
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto rounded bg-muted/30 p-2 prose prose-xs prose-invert max-w-none"
+        className="markdown-body flex-1 overflow-y-auto rounded bg-muted/30 p-2 prose prose-xs prose-invert max-w-none"
         dir={direction}
         lang={htmlLang}
         style={{ maxHeight: "calc(100vh - 400px)", minHeight: "120px", textAlign: "start" }}
@@ -176,8 +182,8 @@ function SynthesisBlock({ synthesis, isStreaming }: { synthesis: string; isStrea
         )}
         {answer && (
           <ReactMarkdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex]}
+            remarkPlugins={chatMarkdownRemarkPlugins}
+            rehypePlugins={markdownRehypePlugins}
             components={{
               table: ({ children, ...props }) => (
                 <div className="my-2 overflow-x-auto rounded border border-border">
@@ -206,7 +212,7 @@ function SynthesisBlock({ synthesis, isStreaming }: { synthesis: string; isStrea
               },
             }}
           >
-            {answer}
+            {renderAnswer}
           </ReactMarkdown>
         )}
         {isStreaming && <span className="animate-pulse">▊</span>}

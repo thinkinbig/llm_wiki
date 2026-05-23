@@ -46,26 +46,42 @@ export function PreviewPanel() {
       })
   }, [selectedFile, setFileContent])
 
+  const persistSave = useCallback(
+    async (markdown: string) => {
+      if (!selectedFile) return
+      if (markdown === lastLoadedRef.current) return
+      // Update preview store before disk write so read mode shows edits
+      // as soon as Done is pressed (write still authoritative).
+      lastLoadedRef.current = markdown
+      setFileContent(markdown)
+      await writeFile(selectedFile, markdown)
+    },
+    [selectedFile, setFileContent],
+  )
+
   const handleSave = useCallback(
     (markdown: string) => {
       if (!selectedFile) return
-      // Ignore no-op saves from the editor's initial re-emit. Only write
-      // when the user has actually changed the content relative to the
-      // last disk read.
       if (markdown === lastLoadedRef.current) return
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
       saveTimerRef.current = setTimeout(() => {
-        writeFile(selectedFile, markdown)
-          .then(() => {
-            // Our own write becomes the new "last loaded" — subsequent
-            // re-emits from Milkdown that match this content must not
-            // trigger another save.
-            lastLoadedRef.current = markdown
-          })
-          .catch((err) => console.error("Failed to save:", err))
+        persistSave(markdown).catch((err) =>
+          console.error("Failed to save:", err),
+        )
       }, 1000)
     },
-    [selectedFile]
+    [selectedFile, persistSave],
+  )
+
+  const handleFlushSave = useCallback(
+    (markdown: string) => {
+      if (!selectedFile) return
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+      return persistSave(markdown).catch((err) => {
+        console.error("Failed to save:", err)
+      })
+    },
+    [selectedFile, persistSave],
   )
 
   useEffect(() => {
@@ -104,6 +120,7 @@ export function PreviewPanel() {
             key={selectedFile}
             content={fileContent}
             onSave={handleSave}
+            onFlushSave={handleFlushSave}
           />
         ) : (
           <FilePreview

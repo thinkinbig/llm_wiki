@@ -11,16 +11,16 @@ import "@milkdown/theme-nord/style.css"
 import "katex/dist/katex.min.css"
 import { Pencil, Eye } from "lucide-react"
 import { parseFrontmatter } from "@/lib/frontmatter"
-import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
 import { FrontmatterPanel } from "@/components/editor/frontmatter-panel"
 import { WikiReader } from "@/components/editor/wiki-reader"
 
 interface WikiEditorInnerProps {
   content: string
+  bodyRef: React.MutableRefObject<string>
   onSave: (markdown: string) => void
 }
 
-function WikiEditorInner({ content, onSave }: WikiEditorInnerProps) {
+function WikiEditorInner({ content, bodyRef, onSave }: WikiEditorInnerProps) {
   // Milkdown fires `markdownUpdated` once on initial parse before any
   // user interaction. That one emit must not be forwarded as a save,
   // otherwise just opening a file can overwrite its content with
@@ -37,6 +37,7 @@ function WikiEditorInner({ content, onSave }: WikiEditorInnerProps) {
           ctx.set(defaultValueCtx, content)
           initialEmitConsumedRef.current = false
           ctx.get(listenerCtx).markdownUpdated((_ctx, markdown) => {
+            bodyRef.current = markdown
             if (!initialEmitConsumedRef.current) {
               initialEmitConsumedRef.current = true
               return
@@ -58,6 +59,8 @@ function WikiEditorInner({ content, onSave }: WikiEditorInnerProps) {
 interface WikiEditorProps {
   content: string
   onSave: (markdown: string) => void
+  /** Immediate write when leaving edit mode (Done). */
+  onFlushSave?: (markdown: string) => void | Promise<void>
 }
 
 function wrapBareMathBlocks(text: string): string {
@@ -67,7 +70,7 @@ function wrapBareMathBlocks(text: string): string {
   )
 }
 
-export function WikiEditor({ content, onSave }: WikiEditorProps) {
+export function WikiEditor({ content, onSave, onFlushSave }: WikiEditorProps) {
   // Default to read mode (ReactMarkdown render). Edit mode swaps
   // in Milkdown WYSIWYG. We default to read because:
   //   1. Milkdown's commonmark/gfm preset has no wikilink schema,
@@ -93,18 +96,37 @@ export function WikiEditor({ content, onSave }: WikiEditorProps) {
   )
 
   const processedBody = useMemo(() => wrapBareMathBlocks(body), [body])
+  const latestBodyRef = useRef(processedBody)
+  latestBodyRef.current = processedBody
+
+  // Do not run ingest-time sanitize on manual saves — it strips `<br />`
+  // lines and collapses newlines (meant for LLM corrupt output). Milkdown
+  // may still normalize paragraph spacing on its own when serializing.
+  const toFullMarkdown = useMemo(
+    () => (markdown: string) => rawBlock + markdown,
+    [rawBlock],
+  )
 
   const handleSave = useMemo(
-    () => (markdown: string) =>
-      onSave(sanitizeIngestedFileContent(rawBlock + markdown)),
-    [onSave, rawBlock],
+    () => (markdown: string) => onSave(toFullMarkdown(markdown)),
+    [onSave, toFullMarkdown],
   )
+
+  const handleModeToggle = async () => {
+    if (mode === "edit") {
+      const full = toFullMarkdown(latestBodyRef.current)
+      if (onFlushSave) await onFlushSave(full)
+      setMode("read")
+      return
+    }
+    setMode("edit")
+  }
 
   return (
     <div className="relative h-full overflow-auto">
       <button
         type="button"
-        onClick={() => setMode((m) => (m === "read" ? "edit" : "read"))}
+        onClick={handleModeToggle}
         title={mode === "read" ? "Edit (raw markdown)" : "Done editing"}
         className="absolute right-3 top-3 z-10 inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/90 px-2 py-1 text-xs text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground"
       >
@@ -121,7 +143,11 @@ export function WikiEditor({ content, onSave }: WikiEditorProps) {
         <MilkdownProvider>
           <div className="prose prose-invert min-w-0 max-w-none overflow-hidden p-6">
             {frontmatter && <FrontmatterPanel data={frontmatter} />}
-            <WikiEditorInner content={processedBody} onSave={handleSave} />
+            <WikiEditorInner
+              content={processedBody}
+              bodyRef={latestBodyRef}
+              onSave={handleSave}
+            />
           </div>
         </MilkdownProvider>
       )}

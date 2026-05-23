@@ -63,7 +63,7 @@ import { parseSources, writeSources } from "@/lib/sources-merge"
  * already-written corrupt files render correctly. Sanitizing on
  * write means newly-generated files never need that fallback,
  * which means re-ingesting an old file once cleans it up
- * permanently. Also used when the in-app editor saves a page.
+ * permanently. Manual editor saves skip this (preserve user spacing).
  */
 export function sanitizeIngestedFileContent(content: string): string {
   let cleaned = content

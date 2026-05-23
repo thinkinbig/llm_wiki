@@ -1,9 +1,11 @@
 import { useMemo } from "react"
 import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
-import remarkMath from "remark-math"
-import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
+import {
+  wikiMarkdownRemarkPlugins,
+  markdownRehypePlugins,
+  prepareMarkdownForRender,
+} from "@/lib/markdown-render"
 import { transformWikilinks } from "@/lib/wikilink-transform"
 import { resolveRelatedSlug } from "@/lib/wiki-page-resolver"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
@@ -34,7 +36,10 @@ export function WikiReader({ body }: WikiReaderProps) {
   const fileTree = useWikiStore((s) => s.fileTree)
   const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
 
-  const transformed = useMemo(() => transformWikilinks(body), [body])
+  const transformed = useMemo(
+    () => transformWikilinks(prepareMarkdownForRender(body)),
+    [body],
+  )
   const renderLanguage = detectLanguage(body)
   const direction = getTextDirection(renderLanguage)
   const htmlLang = getHtmlLang(renderLanguage)
@@ -58,14 +63,14 @@ export function WikiReader({ body }: WikiReaderProps) {
 
   return (
     <div
-      className="prose prose-invert min-w-0 max-w-none"
+      className="markdown-body prose prose-invert min-w-0 max-w-none"
       dir={direction}
       lang={htmlLang}
       style={{ textAlign: "start" }}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
+        remarkPlugins={wikiMarkdownRemarkPlugins}
+        rehypePlugins={markdownRehypePlugins}
         components={{
           a: ({ href, children, ...props }) => {
             const h = typeof href === "string" ? href : ""

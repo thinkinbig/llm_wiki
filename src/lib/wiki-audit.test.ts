@@ -56,3 +56,27 @@ describe("pageFromAuditDetail", () => {
     expect(pageFromAuditDetail("wiki/index.md missing")).toBe("index.md")
   })
 })
+
+describe("WIKI-TITLE-SLUG-MISMATCH", () => {
+  it("does not flag when pageId hyphenation differs but dedupKey matches (2PC)", async () => {
+    const pages = [
+      {
+        rel: "concepts/acid-and-distributed-transactions-xa-2pc.md",
+        slug: "acid-and-distributed-transactions-xa-2pc",
+        dir: "concepts" as const,
+        content: `---
+title: ACID and distributed transactions (XA, 2PC)
+---
+# ACID
+
+Body.
+`,
+        title: "ACID and distributed transactions (XA, 2PC)",
+      },
+    ]
+    const findings = await auditWikiPages(pages, "/wiki", {
+      readFile: async () => "",
+    })
+    expect(findings["WIKI-TITLE-SLUG-MISMATCH"] ?? []).toHaveLength(0)
+  })
+})

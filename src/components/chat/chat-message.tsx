@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react"
 import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
-import remarkMath from "remark-math"
-import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
+import {
+  chatMarkdownRemarkPlugins,
+  markdownRehypePlugins,
+  prepareMarkdownForRender,
+} from "@/lib/markdown-render"
 import {
   Bot, User, FileText, BookmarkPlus, ChevronDown, ChevronRight, RefreshCw, Copy, Check,
   Users, Lightbulb, BookOpen, HelpCircle, GitMerge, BarChart3, Layout, Globe,
@@ -653,7 +655,10 @@ function MarkdownContent({ content }: { content: string }) {
 
   // Separate thinking blocks from main content
   const { thinking, answer } = useMemo(() => separateThinking(cleaned), [cleaned])
-  const processed = useMemo(() => processContent(answer), [answer])
+  const processed = useMemo(
+    () => processContent(prepareMarkdownForRender(answer)),
+    [answer],
+  )
   const renderLanguage = useMemo(() => detectLanguage(answer), [answer])
   const direction = getTextDirection(renderLanguage)
   const htmlLang = getHtmlLang(renderLanguage)
@@ -662,14 +667,14 @@ function MarkdownContent({ content }: { content: string }) {
     <div>
       {thinking && <ThinkingBlock content={thinking} />}
       <div
-        className="chat-markdown prose prose-sm max-w-none dark:prose-invert prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:my-2 prose-code:text-xs prose-code:before:content-none prose-code:after:content-none"
+        className="markdown-body chat-markdown prose prose-sm max-w-none dark:prose-invert prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:my-2 prose-code:text-xs prose-code:before:content-none prose-code:after:content-none"
         dir={direction}
         lang={htmlLang}
         style={{ textAlign: "start" }}
       >
         <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkMath]}
-          rehypePlugins={[rehypeKatex]}
+          remarkPlugins={chatMarkdownRemarkPlugins}
+          rehypePlugins={markdownRehypePlugins}
           components={{
             a: ({ href, children }) => {
               if (href?.startsWith("wikilink:")) {
