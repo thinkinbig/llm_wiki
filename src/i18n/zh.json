@@ -147,7 +147,8 @@
       "orphan": "孤立页面",
       "broken-link": "失效链接",
       "no-outlinks": "无出站链接",
-      "semantic": "语义问题"
+      "semantic": "语义问题",
+      "wiki-audit": "Wiki 缺陷"
     },
     "issues": "{{count}} 个问题",
     "issues_plural": "{{count}} 个问题"

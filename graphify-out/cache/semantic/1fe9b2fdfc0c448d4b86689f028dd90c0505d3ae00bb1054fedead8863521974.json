@@ -1,0 +1,1 @@
+{"nodes": [], "edges": [{"source": "src_tauri_tauri_windows_conf_bundle_resources", "target": "concept_pdfium_bundled_runtime", "relation": "implements", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src-tauri/tauri.windows.conf.json", "source_location": null, "weight": 1.0}], "hyperedges": []}

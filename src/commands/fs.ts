@@ -98,7 +98,7 @@ export async function createProject(
   const id = await ensureProjectId(raw.path)
   await upsertProjectInfo(id, raw.path, raw.name)
   await ensureWikiGovernance(raw.path)
-  return { id, name: raw.name, path: raw.path }
+  return { id, name: raw.name, path: raw.path.replace(/\\/g, "/") }
 }
 
 export async function openProject(path: string): Promise<WikiProject> {
@@ -106,7 +106,7 @@ export async function openProject(path: string): Promise<WikiProject> {
   const id = await ensureProjectId(raw.path)
   await upsertProjectInfo(id, raw.path, raw.name)
   await ensureWikiGovernance(raw.path)
-  return { id, name: raw.name, path: raw.path }
+  return { id, name: raw.name, path: raw.path.replace(/\\/g, "/") }
 }
 
 export async function openProjectFolder(path: string): Promise<void> {

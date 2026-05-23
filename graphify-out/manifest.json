@@ -1,8 +1,8 @@
 {
   "/home/zeyuli/Code/llm_wiki/package.json": {
-    "mtime": 1779373616.0473845,
-    "ast_hash": "267c13259faf775a900d7ee913a8a855",
-    "semantic_hash": "267c13259faf775a900d7ee913a8a855"
+    "mtime": 1779466779.7936182,
+    "ast_hash": "366ad156ad83f57a5fcc17d940bef857",
+    "semantic_hash": "366ad156ad83f57a5fcc17d940bef857"
   },
   "/home/zeyuli/Code/llm_wiki/components.json": {
     "mtime": 1778401994.7564738,
@@ -120,9 +120,9 @@
     "semantic_hash": "a9fac9aec8fdd101b82ffafb65647bca"
   },
   "/home/zeyuli/Code/llm_wiki/src-tauri/src/commands/search.rs": {
-    "mtime": 1779321826.2990205,
-    "ast_hash": "6a2ae20213217dbe91be126f2b012200",
-    "semantic_hash": "6a2ae20213217dbe91be126f2b012200"
+    "mtime": 1779466078.4276035,
+    "ast_hash": "ce139a945b066b97bbe6ed2fca835a9b",
+    "semantic_hash": "ce139a945b066b97bbe6ed2fca835a9b"
   },
   "/home/zeyuli/Code/llm_wiki/src-tauri/src/commands/project.rs": {
     "mtime": 1779320108.9883273,
@@ -215,9 +215,9 @@
     "semantic_hash": "26a2a08b0014dd22d700e6f22be59516"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/ingest-followup.test.ts": {
-    "mtime": 1779372284.5895014,
-    "ast_hash": "2af142d0a38804358a0727e6949ae3e2",
-    "semantic_hash": "2af142d0a38804358a0727e6949ae3e2"
+    "mtime": 1779489866.1344726,
+    "ast_hash": "d4161befc1928101ec802cb286a03dc3",
+    "semantic_hash": "d4161befc1928101ec802cb286a03dc3"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/reasoning-detector.test.ts": {
     "mtime": 1778401994.8804102,
@@ -420,9 +420,9 @@
     "semantic_hash": "5a6fd53fdcf2be529e9cc0b718fde352"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/project-file-sync.ts": {
-    "mtime": 1779139181.3744051,
-    "ast_hash": "c6854529b01e73325816c479475d8df9",
-    "semantic_hash": "c6854529b01e73325816c479475d8df9"
+    "mtime": 1779489790.647826,
+    "ast_hash": "c76f9b8ce3c69ad449f81c04683fe234",
+    "semantic_hash": "c76f9b8ce3c69ad449f81c04683fe234"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/sources-tree-delete.ts": {
     "mtime": 1778401994.8814096,
@@ -435,9 +435,9 @@
     "semantic_hash": "57f0bd6bfe14fcfd48e75304cd306eda"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/deep-research.ts": {
-    "mtime": 1778401994.8792157,
-    "ast_hash": "ed9c5cb0479b86f6d320dc0991666c91",
-    "semantic_hash": "ed9c5cb0479b86f6d320dc0991666c91"
+    "mtime": 1779490012.778363,
+    "ast_hash": "012b2efd2d0b7e27b099c375d7d6e3e1",
+    "semantic_hash": "012b2efd2d0b7e27b099c375d7d6e3e1"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/azure-openai.ts": {
     "mtime": 1779178319.9274511,
@@ -485,9 +485,9 @@
     "semantic_hash": "f1eaf185d29d787526e2b56921c70061"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/wiki-graph.ts": {
-    "mtime": 1779214502.1023962,
-    "ast_hash": "7e915d49b894cb62ef941c23a48bae74",
-    "semantic_hash": "7e915d49b894cb62ef941c23a48bae74"
+    "mtime": 1779489012.9190598,
+    "ast_hash": "077e310244055e9df8c13747ad8a6525",
+    "semantic_hash": "077e310244055e9df8c13747ad8a6525"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/wiki-cleanup.test.ts": {
     "mtime": 1779370357.4593112,
@@ -595,9 +595,9 @@
     "semantic_hash": "65a30d35dc54b8895bf2b9993195d965"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/post-ingest-materialize.ts": {
-    "mtime": 1779372837.5238795,
-    "ast_hash": "7fb961f41866eb21b386eb922f6bfaea",
-    "semantic_hash": "7fb961f41866eb21b386eb922f6bfaea"
+    "mtime": 1779490016.3423662,
+    "ast_hash": "69c8ae4d0c37381c2ae138a97e50a28b",
+    "semantic_hash": "69c8ae4d0c37381c2ae138a97e50a28b"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/lint.scenarios.test.ts": {
     "mtime": 1778401994.8804102,
@@ -695,9 +695,9 @@
     "semantic_hash": "635652913a2f7c09c08b2682af107cec"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/wiki-page-resolver.ts": {
-    "mtime": 1779372532.984186,
-    "ast_hash": "a7bfd8ec29c54d70385dd7be651e6454",
-    "semantic_hash": "a7bfd8ec29c54d70385dd7be651e6454"
+    "mtime": 1779489046.9277475,
+    "ast_hash": "8e729dd699936e91eea08e7b8f50b20b",
+    "semantic_hash": "8e729dd699936e91eea08e7b8f50b20b"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/project-mutex.ts": {
     "mtime": 1778401994.8804102,
@@ -795,9 +795,9 @@
     "semantic_hash": "254827494fb0f4bb2d98121175308916"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/embedding.ts": {
-    "mtime": 1779321627.9441504,
-    "ast_hash": "d98cf867e30d7d4753b5ad01b0a963be",
-    "semantic_hash": "d98cf867e30d7d4753b5ad01b0a963be"
+    "mtime": 1779465944.9968152,
+    "ast_hash": "de8bb8bee4e3ff88aea8ef7b5a67f76d",
+    "semantic_hash": "de8bb8bee4e3ff88aea8ef7b5a67f76d"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/text-chunker.ts": {
     "mtime": 1778401994.8814096,
@@ -960,9 +960,9 @@
     "semantic_hash": "67800ecbc143e7772c802b8d36e04adc"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/dedup-runner.ts": {
-    "mtime": 1779371061.9097524,
-    "ast_hash": "13edfb2e3544f7cc97d1151ddc9ceb49",
-    "semantic_hash": "13edfb2e3544f7cc97d1151ddc9ceb49"
+    "mtime": 1779490027.039398,
+    "ast_hash": "05b4e059e34a531309e40c00bb0c8830",
+    "semantic_hash": "05b4e059e34a531309e40c00bb0c8830"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/vision-caption.real-llm.test.ts": {
     "mtime": 1778401994.8814096,
@@ -980,14 +980,14 @@
     "semantic_hash": "f01a824be5eb760d50a36a56caf21b0a"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/analysis.ts": {
-    "mtime": 1779214502.1012769,
-    "ast_hash": "4ef1ce2c5df46431e92250510776791d",
-    "semantic_hash": "4ef1ce2c5df46431e92250510776791d"
+    "mtime": 1779465082.0157735,
+    "ast_hash": "9a5b54f2e056fc6f8fdc08423c33d860",
+    "semantic_hash": "9a5b54f2e056fc6f8fdc08423c33d860"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/post-ingest-materialize.test.ts": {
-    "mtime": 1779368497.2567647,
-    "ast_hash": "941bb4fa5dbc50a9626029fd64ae5833",
-    "semantic_hash": "941bb4fa5dbc50a9626029fd64ae5833"
+    "mtime": 1779490107.4654882,
+    "ast_hash": "e46ef781a332eb1ad2b6386969109b2f",
+    "semantic_hash": "e46ef781a332eb1ad2b6386969109b2f"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/ingest-queue.test.ts": {
     "mtime": 1779321669.0771284,
@@ -1060,9 +1060,9 @@
     "semantic_hash": "62c9306e63dc46098d6f93e377da83b4"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/ingest.ts": {
-    "mtime": 1779373067.3392594,
-    "ast_hash": "9d134bb17740da6b0a4b7af44a6dd140",
-    "semantic_hash": "9d134bb17740da6b0a4b7af44a6dd140"
+    "mtime": 1779490006.3693929,
+    "ast_hash": "78aa94b7aff766ef639e77f246800448",
+    "semantic_hash": "78aa94b7aff766ef639e77f246800448"
   },
   "/home/zeyuli/Code/llm_wiki/src/lib/sweep-reviews.race.test.ts": {
     "mtime": 1778401994.8814096,
@@ -1120,14 +1120,14 @@
     "semantic_hash": "523980ab130c58ff69280b399a4759ef"
   },
   "/home/zeyuli/Code/llm_wiki/src/components/chat/chat-message.tsx": {
-    "mtime": 1779367875.6500273,
-    "ast_hash": "1957f2e0e9dfe990757a232bee51e2af",
-    "semantic_hash": "1957f2e0e9dfe990757a232bee51e2af"
+    "mtime": 1779490023.4771059,
+    "ast_hash": "eb9e871251b525fb7f3b102e15830568",
+    "semantic_hash": "eb9e871251b525fb7f3b102e15830568"
   },
   "/home/zeyuli/Code/llm_wiki/src/components/chat/chat-panel.tsx": {
-    "mtime": 1779139181.3698974,
-    "ast_hash": "3167d572f2d4a015f49df2529d02fa08",
-    "semantic_hash": "3167d572f2d4a015f49df2529d02fa08"
+    "mtime": 1779489316.2494137,
+    "ast_hash": "74f72bbb4274a3699aa5fad867be26be",
+    "semantic_hash": "74f72bbb4274a3699aa5fad867be26be"
   },
   "/home/zeyuli/Code/llm_wiki/src/components/chat/chat-input.tsx": {
     "mtime": 1778401994.8769462,
@@ -1140,9 +1140,9 @@
     "semantic_hash": "df123fff9259d6be7c00409f27897c11"
   },
   "/home/zeyuli/Code/llm_wiki/src/components/project/create-project-dialog.tsx": {
-    "mtime": 1779184995.4343748,
-    "ast_hash": "f215772b4c0206ef877ec2fbc1ffc822",
-    "semantic_hash": "f215772b4c0206ef877ec2fbc1ffc822"
+    "mtime": 1779489753.3588722,
+    "ast_hash": "6ddf9fa262e60d9c63f7a2b45c0d7668",
+    "semantic_hash": "6ddf9fa262e60d9c63f7a2b45c0d7668"
   },
   "/home/zeyuli/Code/llm_wiki/src/components/project/template-picker.tsx": {
     "mtime": 1779139181.3705373,
@@ -1165,9 +1165,9 @@
     "semantic_hash": "1b86b2a569a9b1f5e7e9537c29f28c4f"
   },
   "/home/zeyuli/Code/llm_wiki/src/components/review/review-view.tsx": {
-    "mtime": 1779372899.3891068,
-    "ast_hash": "ea711a73c982a65acf7b3853e6e79fbb",
-    "semantic_hash": "ea711a73c982a65acf7b3853e6e79fbb"
+    "mtime": 1779490015.3672996,
+    "ast_hash": "96d046d71c226150c098d8d6739c0d28",
+    "semantic_hash": "96d046d71c226150c098d8d6739c0d28"
   },
   "/home/zeyuli/Code/llm_wiki/src/components/layout/chat-bar.tsx": {
     "mtime": 1778401994.8775022,
@@ -1470,9 +1470,9 @@
     "semantic_hash": "9e4392873363aa2a021d132990633865"
   },
   "/home/zeyuli/Code/llm_wiki/src/commands/fs.ts": {
-    "mtime": 1779184450.686438,
-    "ast_hash": "152882fef73e173763ede2f6a00cbeb0",
-    "semantic_hash": "152882fef73e173763ede2f6a00cbeb0"
+    "mtime": 1779490029.7926543,
+    "ast_hash": "c5d4cbbc6230266e6dfb219dc46ecf42",
+    "semantic_hash": "c5d4cbbc6230266e6dfb219dc46ecf42"
   },
   "/home/zeyuli/Code/llm_wiki/src/commands/file-sync.ts": {
     "mtime": 1779139181.3697217,
@@ -1500,9 +1500,9 @@
     "semantic_hash": "a1a35662e463ea1795ef807c3bf5cb40"
   },
   "/home/zeyuli/Code/llm_wiki/src/stores/review-store.ts": {
-    "mtime": 1778401994.8835657,
-    "ast_hash": "1efc9c96e69b55e18d0a307d8230aab7",
-    "semantic_hash": "1efc9c96e69b55e18d0a307d8230aab7"
+    "mtime": 1779489753.7310667,
+    "ast_hash": "9e597cfd499f7670af834690bd0b07a0",
+    "semantic_hash": "9e597cfd499f7670af834690bd0b07a0"
   },
   "/home/zeyuli/Code/llm_wiki/src/stores/review-store.test.ts": {
     "mtime": 1778401994.8835657,
@@ -1520,9 +1520,9 @@
     "semantic_hash": "00b774b954717240c1ca76429cbc1c4a"
   },
   "/home/zeyuli/Code/llm_wiki/src/stores/review-store.property.test.ts": {
-    "mtime": 1778401994.8835657,
-    "ast_hash": "3148282d1a3e2061bef3f57b1af63dee",
-    "semantic_hash": "3148282d1a3e2061bef3f57b1af63dee"
+    "mtime": 1779489801.3141372,
+    "ast_hash": "1b51dd18d467b792dd2ce0cce112b519",
+    "semantic_hash": "1b51dd18d467b792dd2ce0cce112b519"
   },
   "/home/zeyuli/Code/llm_wiki/extension/Turndown.js": {
     "mtime": 1778401994.7574158,
@@ -1560,9 +1560,9 @@
     "semantic_hash": "7953122eebc7aca33db25cd86a89a19a"
   },
   "/home/zeyuli/Code/llm_wiki/CONTEXT.md": {
-    "mtime": 1779354318.306098,
-    "ast_hash": "51a6b02d8a895f7fe544925f6fbd4656",
-    "semantic_hash": "51a6b02d8a895f7fe544925f6fbd4656"
+    "mtime": 1779489671.890973,
+    "ast_hash": "b46a4a6396b43b089e51a76e5a92af50",
+    "semantic_hash": "b46a4a6396b43b089e51a76e5a92af50"
   },
   "/home/zeyuli/Code/llm_wiki/README.md": {
     "mtime": 1779280501.526463,
@@ -1713,5 +1713,60 @@
     "mtime": 1778401994.7574158,
     "ast_hash": "0fbb4b7fc187d3652746c930cd50fb90",
     "semantic_hash": "0fbb4b7fc187d3652746c930cd50fb90"
+  },
+  "/home/zeyuli/Code/llm_wiki/eval/run.ts": {
+    "mtime": 1779467036.126285,
+    "ast_hash": "7a07c9c8b0050bc775c308425d482658",
+    "semantic_hash": "7a07c9c8b0050bc775c308425d482658"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/wiki-ontology-bootstrap.ts": {
+    "mtime": 1779489865.7517128,
+    "ast_hash": "0a58efa23b08bb2c92d98428224c3e74",
+    "semantic_hash": "0a58efa23b08bb2c92d98428224c3e74"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/wiki-page-write-governance.ts": {
+    "mtime": 1779490106.63047,
+    "ast_hash": "0b7a57b89507219a836860100547f1c2",
+    "semantic_hash": "0b7a57b89507219a836860100547f1c2"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/wiki-ontology.test.ts": {
+    "mtime": 1779489793.4658225,
+    "ast_hash": "7f8b7f50033a4276f7f118960e94e0f9",
+    "semantic_hash": "7f8b7f50033a4276f7f118960e94e0f9"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/wiki-ontology.ts": {
+    "mtime": 1779489725.5409064,
+    "ast_hash": "4ddda1eb7b4d1e3c3f8c813c656df78f",
+    "semantic_hash": "4ddda1eb7b4d1e3c3f8c813c656df78f"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/wiki-ontology-validation.ts": {
+    "mtime": 1779489865.0324533,
+    "ast_hash": "9f14d42c23cb1d69b377ec7a50712c9d",
+    "semantic_hash": "9f14d42c23cb1d69b377ec7a50712c9d"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/wiki-page-write-governance.test.ts": {
+    "mtime": 1779490124.6507971,
+    "ast_hash": "7638a4f11b5ffc46fc6d36d30c7ab8f3",
+    "semantic_hash": "7638a4f11b5ffc46fc6d36d30c7ab8f3"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/wiki-ontology-bootstrap.test.ts": {
+    "mtime": 1779489810.2821262,
+    "ast_hash": "1bec2073d798418494f2acd47367bf63",
+    "semantic_hash": "1bec2073d798418494f2acd47367bf63"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/wiki-ontology-validation.test.ts": {
+    "mtime": 1779489866.439705,
+    "ast_hash": "b53685ccfa073cb6dc5050d22fca3880",
+    "semantic_hash": "b53685ccfa073cb6dc5050d22fca3880"
+  },
+  "/home/zeyuli/Code/llm_wiki/src/lib/page-registry.ts": {
+    "mtime": 1779489728.6109028,
+    "ast_hash": "0827baccb6bb709ab8e3e02eef27fc32",
+    "semantic_hash": "0827baccb6bb709ab8e3e02eef27fc32"
+  },
+  "/home/zeyuli/Code/llm_wiki/docs/adr/0006-wiki-ontology-lite-governance.md": {
+    "mtime": 1779489670.8929741,
+    "ast_hash": "de236f374cd6018e5956671416e05824",
+    "semantic_hash": "de236f374cd6018e5956671416e05824"
   }
 }
