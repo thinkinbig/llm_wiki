@@ -232,6 +232,7 @@ export async function retryTask(taskId: string): Promise<void> {
 
   task.status = "pending"
   task.error = null
+  task.retryCount = 0
   await saveQueue(currentProjectPath)
   processNext(currentProjectId)
 }
@@ -248,6 +249,7 @@ export async function retryAllFailedTasks(): Promise<number> {
     if (task.projectId !== currentProjectId || task.status !== "failed") continue
     task.status = "pending"
     task.error = null
+    task.retryCount = 0
     requeued++
   }
 

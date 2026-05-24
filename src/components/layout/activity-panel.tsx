@@ -86,7 +86,11 @@ export function ActivityPanel() {
 
   const handleRetryAllFailed = useCallback(() => {
     if (!project) return
-    void retryAllFailedTasks().then(() => setQueueTasks([...getQueue()]))
+    void retryAllFailedTasks()
+      .then(() => setQueueTasks([...getQueue()]))
+      .catch((err) => {
+        console.error("[activity-panel] failed to retry failed ingest tasks:", err)
+      })
   }, [project])
 
   const handleIngestCancel = useCallback((taskId: string) => {

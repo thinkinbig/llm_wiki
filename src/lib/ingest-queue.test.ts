@@ -214,6 +214,7 @@ describe("ingest-queue — retry & failure", () => {
     expect(getQueue()[0].status).toBe("failed")
 
     const taskId = getQueue()[0].id
+    expect(getQueue()[0].retryCount).toBe(3)
     mockAutoIngest.mockResolvedValueOnce(["wiki/sources/foo.md"])
     await retryTask(taskId)
     await flushMicrotasks(10)
@@ -254,6 +255,7 @@ describe("ingest-queue — retry & failure", () => {
     expect(requeued).toBe(2)
     expect(mockAutoIngest).toHaveBeenCalledOnce()
     expect(getQueue().map((task) => task.error)).toEqual([null, null])
+    expect(getQueue().map((task) => task.retryCount)).toEqual([0, 0])
     expect(getQueue().map((task) => task.status)).toEqual(["processing", "pending"])
     expect(mockWriteFile).toHaveBeenCalled()
   })
