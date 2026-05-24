@@ -10,6 +10,7 @@ import { ContextSizeSelector } from "../context-size-selector"
 import { resolveConfig } from "../preset-resolver"
 import { normalizeEndpoint } from "@/lib/endpoint-normalizer"
 import { AZURE_OPENAI_API_VERSION } from "@/lib/azure-openai"
+import { testLlmConnection, testLlmFunction, type ProviderTestResult } from "@/lib/connection-tests"
 
 export function LlmProviderSection() {
   const { t } = useTranslation()
@@ -102,6 +103,11 @@ interface PresetRowProps {
   onChange: (patch: ProviderOverride) => void
 }
 
+type ProviderTestState =
+  | { kind: "idle" }
+  | { kind: "running"; label: string }
+  | { kind: "done"; result: ProviderTestResult }
+
 function PresetRow({
   preset,
   override,
@@ -121,6 +127,7 @@ function PresetRow({
   const azureApiVersion = ov.azureApiVersion ?? preset.azureApiVersion ?? AZURE_OPENAI_API_VERSION
   const context = ov.maxContextSize ?? preset.suggestedContextSize ?? 131072
   const reasoning = ov.reasoning ?? { mode: "auto" as const }
+  const [testState, setTestState] = useState<ProviderTestState>({ kind: "idle" })
   const hasConfig = !!apiKey || !!ov.baseUrl || !!ov.model || !!ov.azureApiVersion
   // Local CLI providers authenticate via their own existing login state
   // (inherited by the spawned subprocess), so no API key field is shown.
@@ -129,6 +136,24 @@ function PresetRow({
     preset.provider !== "ollama" &&
     preset.provider !== "claude-code" &&
     preset.provider !== "codex-cli"
+
+  const resolvedConfig = useMemo(
+    () => resolveConfig(preset, ov, useWikiStore.getState().llmConfig),
+    [apiKey, apiMode, azureApiVersion, baseUrl, context, model, preset, reasoning, ov],
+  )
+
+  async function runProviderTest(kind: "connection" | "function") {
+    setTestState({
+      kind: "running",
+      label: kind === "connection"
+        ? t("settings.sections.llm.testingConnection")
+        : t("settings.sections.llm.testingFunction"),
+    })
+    const result = kind === "connection"
+      ? await testLlmConnection(resolvedConfig)
+      : await testLlmFunction(resolvedConfig)
+    setTestState({ kind: "done", result })
+  }
 
   return (
     <div
@@ -310,6 +335,49 @@ function PresetRow({
             value={reasoning}
             onChange={(reasoning) => onChange({ reasoning })}
           />
+
+          <div className="space-y-2 rounded-md border p-3">
+            <div>
+              <div className="text-sm font-medium">
+                {t("settings.sections.llm.providerTests")}
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("settings.sections.llm.providerTestsHint")}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void runProviderTest("connection")}
+                disabled={testState.kind === "running"}
+                className="rounded-md border px-3 py-1.5 text-xs hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {t("settings.sections.llm.testConnection")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void runProviderTest("function")}
+                disabled={testState.kind === "running"}
+                className="rounded-md border px-3 py-1.5 text-xs hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {t("settings.sections.llm.testFunction")}
+              </button>
+            </div>
+            {testState.kind === "running" && (
+              <p className="text-xs text-muted-foreground">{testState.label}</p>
+            )}
+            {testState.kind === "done" && (
+              <div
+                className={`rounded-md border px-3 py-2 text-xs ${
+                  testState.result.ok
+                    ? "border-emerald-500/40 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400"
+                    : "border-destructive/40 bg-destructive/5 text-destructive"
+                }`}
+              >
+                {testState.result.message}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

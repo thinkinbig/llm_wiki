@@ -9,16 +9,19 @@ import {
   type SearchProvider,
   type SearchProviderOverride,
 } from "@/stores/wiki-store"
-import { SEARXNG_CATEGORY_OPTIONS, SERPAPI_ENGINE_OPTIONS, resolveSearchConfig } from "@/lib/web-search"
+import {
+  SEARXNG_CATEGORY_OPTIONS,
+  SERPAPI_ENGINE_OPTIONS,
+  resolveSearchConfig,
+} from "@/lib/web-search"
 
 const SEARCH_PROVIDERS = [
   {
     id: "ollama",
-    label: "Ollama (Local)",
-    hint: "Free web search via your local Ollama instance — no API key required",
-    urlPlaceholder: "http://localhost:11434",
-    needsApiKey: false,
-    isLocal: true,
+    label: "Ollama",
+    hint: "Ollama Web Search API",
+    keyPlaceholder: "Enter your Ollama API key (ollama.com)",
+    needsApiKey: true,
   },
   {
     id: "tavily",
@@ -90,8 +93,6 @@ export function WebSearchSection() {
           const isActive = resolvedConfig.provider === provider.id
           const hasConfig = provider.id === "searxng"
             ? !!override?.searXngUrl
-            : provider.id === "ollama"
-            ? !!override?.ollamaUrl
             : !!override?.apiKey
           const isExpanded = !!expanded[provider.id]
           return (
@@ -159,20 +160,7 @@ export function WebSearchSection() {
 
               {isExpanded && (
                 <div className="space-y-4 border-t bg-background/50 px-4 py-3">
-                  {"isLocal" in provider && provider.isLocal ? (
-                    // Ollama: URL field without API key
-                    <div className="space-y-2">
-                      <Label>{t("settings.sections.webSearch.instanceUrl")}</Label>
-                      <Input
-                        value={override?.ollamaUrl ?? resolvedConfig.ollamaUrl ?? "http://localhost:11434"}
-                        onChange={(e) => updateProvider("ollama", { ollamaUrl: e.target.value })}
-                        placeholder={provider.urlPlaceholder}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        {t("settings.sections.webSearch.ollamaHint")}
-                      </p>
-                    </div>
-                  ) : provider.needsApiKey ? (
+                  {provider.needsApiKey ? (
                     <div className="space-y-2">
                       <Label>{t("settings.apiKey")}</Label>
                       <Input
@@ -181,6 +169,11 @@ export function WebSearchSection() {
                         onChange={(e) => updateProvider(provider.id, { apiKey: e.target.value })}
                         placeholder={provider.keyPlaceholder}
                       />
+                      {provider.id === "ollama" && (
+                        <p className="text-xs text-muted-foreground">
+                          {t("settings.sections.webSearch.ollamaHint")}
+                        </p>
+                      )}
                     </div>
                   ) : (
                     <div className="space-y-2">

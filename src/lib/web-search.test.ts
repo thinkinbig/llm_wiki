@@ -175,4 +175,77 @@ describe("webSearch", () => {
       serpApiEngine: "google",
     })).toBe(true)
   })
+
+  it("requires an API key for the Ollama Web Search API", async () => {
+    await expect(webSearch(
+      "official ollama",
+      {
+        provider: "ollama",
+        apiKey: "",
+        providerConfigs: {
+          ollama: { ollamaUrl: "https://ollama.com" },
+        },
+      },
+      5,
+    )).rejects.toThrow("requires an Ollama API key")
+
+    expect(hasConfiguredSearchProvider({
+      provider: "ollama",
+      apiKey: "",
+      providerConfigs: {
+        ollama: { ollamaUrl: "https://ollama.com" },
+      },
+    })).toBe(false)
+  })
+
+  it("calls the Ollama Web Search API with Bearer auth", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      results: [
+        { title: "Official", url: "https://ollama.example/search", content: "Cloud result" },
+      ],
+    }))
+
+    const out = await webSearch(
+      "official ollama",
+      {
+        provider: "ollama",
+        apiKey: "",
+        providerConfigs: {
+          ollama: { apiKey: "ollama-key" },
+        },
+      },
+      1,
+    )
+    const [url, init] = fetchMock.mock.calls[0]
+
+    expect(url).toBe("https://ollama.com/api/web_search")
+    expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer ollama-key")
+    expect(JSON.parse(String(init?.body))).toEqual({ query: "official ollama", max_results: 1 })
+    expect(out).toEqual([
+      { title: "Official", url: "https://ollama.example/search", snippet: "Cloud result", source: "ollama.example" },
+    ])
+    expect(hasConfiguredSearchProvider({
+      provider: "ollama",
+      apiKey: "",
+      providerConfigs: {
+        ollama: { apiKey: "ollama-key" },
+      },
+    })).toBe(true)
+  })
+
+  it("surfaces Ollama authentication guidance for 401 responses", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "unauthorized" }, { status: 401 }))
+
+    await expect(webSearch(
+      "official ollama",
+      {
+        provider: "ollama",
+        apiKey: "",
+        providerConfigs: {
+          ollama: { apiKey: "bad-key" },
+        },
+      },
+      5,
+    )).rejects.toThrow("Check your Ollama API key")
+  })
 })

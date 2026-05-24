@@ -77,7 +77,7 @@ export function resolveSearchConfig(config: SearchApiConfig): SearchApiConfig {
       serpApiEngine: config.serpApiEngine ?? providerConfigs.serpapi?.serpApiEngine ?? "google",
       searXngUrl: config.searXngUrl ?? providerConfigs.searxng?.searXngUrl ?? "",
       searXngCategories: config.searXngCategories ?? providerConfigs.searxng?.searXngCategories ?? ["general"],
-      ollamaUrl: config.ollamaUrl ?? providerConfigs.ollama?.ollamaUrl ?? "http://localhost:11434",
+      ollamaUrl: config.ollamaUrl ?? providerConfigs.ollama?.ollamaUrl ?? "https://ollama.com",
       providerConfigs,
     }
   }
@@ -90,7 +90,7 @@ export function resolveSearchConfig(config: SearchApiConfig): SearchApiConfig {
     serpApiEngine: activeOverride?.serpApiEngine ?? config.serpApiEngine ?? "google",
     searXngUrl: activeOverride?.searXngUrl ?? config.searXngUrl ?? "",
     searXngCategories: activeOverride?.searXngCategories ?? config.searXngCategories ?? ["general"],
-    ollamaUrl: activeOverride?.ollamaUrl ?? config.ollamaUrl ?? "http://localhost:11434",
+    ollamaUrl: activeOverride?.ollamaUrl ?? config.ollamaUrl ?? "https://ollama.com",
     providerConfigs,
   }
 }
@@ -102,7 +102,7 @@ export function hasConfiguredSearchProvider(config: SearchApiConfig): boolean {
     return Boolean(resolved.searXngUrl?.trim())
   }
   if (resolved.provider === "ollama") {
-    return true // Ollama uses default localhost URL if not configured
+    return Boolean(resolved.apiKey?.trim())
   }
   return Boolean(resolved.apiKey?.trim())
 }
@@ -122,6 +122,9 @@ export async function webSearch(
   if (resolved.provider === "searxng" && !resolved.searXngUrl?.trim()) {
     throw new Error("Web search not configured. Add a SearXNG instance URL in Settings.")
   }
+  if (resolved.provider === "ollama" && !resolved.apiKey?.trim()) {
+    throw new Error("Ollama Web Search API requires an Ollama API key. Add one in Settings.")
+  }
 
   switch (resolved.provider) {
     case "tavily":
@@ -131,7 +134,7 @@ export async function webSearch(
     case "searxng":
       return searXngSearch(query, resolved.searXngUrl ?? "", maxResults, resolved.searXngCategories ?? ["general"])
     case "ollama":
-      return ollamaSearch(query, resolved.ollamaUrl ?? "http://localhost:11434", maxResults)
+      return ollamaSearch(query, resolved.apiKey ?? "", maxResults)
     default:
       throw new Error(`Unknown search provider: ${resolved.provider}`)
   }
@@ -367,18 +370,28 @@ interface OllamaSearchResponse {
 
 async function ollamaSearch(
   query: string,
-  ollamaUrl: string,
+  apiKey: string,
   maxResults: number,
 ): Promise<WebSearchResult[]> {
-  const baseUrl = ollamaUrl.replace(/\/+$/, "")
-  const searchUrl = `${baseUrl}/api/experimental/web_search`
+  const trimmedApiKey = apiKey.trim()
+  if (!trimmedApiKey) {
+    throw new Error("Ollama Web Search API requires an Ollama API key. Add one in Settings.")
+  }
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  }
+  if (trimmedApiKey) {
+    headers.Authorization = `Bearer ${trimmedApiKey}`
+  }
 
   const httpFetch = await getHttpFetch()
   let response: Response
   try {
-    response = await httpFetch(searchUrl, {
+    response = await httpFetch("https://ollama.com/api/web_search", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         query,
         max_results: maxResults,
@@ -387,7 +400,7 @@ async function ollamaSearch(
   } catch (err) {
     if (isFetchNetworkError(err)) {
       throw new Error(
-        `Network error reaching Ollama at ${baseUrl}. Make sure Ollama is running and web search is enabled.`,
+        "Network error reaching the Ollama Web Search API. Check your connectivity and whether the Ollama API key is still valid.",
       )
     }
     throw err
@@ -396,7 +409,7 @@ async function ollamaSearch(
   if (!response.ok) {
     if (response.status === 401) {
       throw new Error(
-        "Ollama requires authentication. Run `ollama signin` in your terminal to authenticate.",
+        "Ollama Web Search API authentication failed. Check your Ollama API key.",
       )
     }
     const errorText = await response.text().catch(() => "Unknown error")
