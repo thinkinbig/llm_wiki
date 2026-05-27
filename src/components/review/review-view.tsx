@@ -90,7 +90,6 @@ export function ReviewView() {
         const slug = title.toLowerCase().replace(/[^a-z0-9\s-]/g, "").trim().replace(/\s+/g, "-").slice(0, 50)
         const date = new Date().toISOString().slice(0, 10)
         const fileName = `${slug}-${date}.md`
-        const filePath = `${pp}/wiki/queries/${fileName}`
         const relPath = `wiki/queries/${fileName}`
 
         const frontmatter = `---\ntype: query\ntitle: "${title.replace(/"/g, '\\"')}"\ncreated: ${date}\ntags: []\n---\n\n`

@@ -2,7 +2,7 @@ import { webSearch } from "./web-search"
 import { streamChat } from "./llm-client"
 import { autoIngest } from "./ingest"
 import { writeGovernedWikiPage } from "@/lib/wiki-page-write-governance"
-import { writeFile, readFile, listDirectory } from "@/commands/fs"
+import { readFile, listDirectory } from "@/commands/fs"
 import { useWikiStore, type LlmConfig, type SearchApiConfig } from "@/stores/wiki-store"
 import { useResearchStore } from "@/stores/research-store"
 import { normalizePath } from "@/lib/path-utils"
@@ -169,7 +169,6 @@ async function executeResearch(
     const date = new Date().toISOString().slice(0, 10)
     const slug = topic.toLowerCase().replace(/[^a-z0-9\s-]/g, "").trim().replace(/\s+/g, "-").slice(0, 50)
     const fileName = `research-${slug}-${date}.md`
-    const filePath = `${pp}/wiki/queries/${fileName}`
 
     const references = webResults
       .map((r, i) => `${i + 1}. [${r.title}](${r.url}) — ${r.source}`)

@@ -4,7 +4,7 @@ import { validateWikiPageWrite } from "./wiki-ontology-validation"
 
 const ontology = resolveOntology(buildOntologyForTemplate("general", "strict"))
 
-const entityPage = (path: string, type = "entity") =>
+const entityPage = (_path: string, type = "entity") =>
   `---\ntype: ${type}\ntitle: Test Page\ncreated: 2026-05-21\n---\n\n# Body\n`
 
 describe("validateWikiPageWrite", () => {

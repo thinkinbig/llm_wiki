@@ -2,7 +2,7 @@
  * Lazy bootstrap for wiki ontology + page registry — ADR 0006.
  */
 
-import { readFile, writeFile } from "@/commands/fs"
+import { readFile } from "@/commands/fs"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { normalizePath } from "@/lib/path-utils"
 import { rebuildPageRegistry, wikiLinkTargetFromRelPath } from "@/lib/page-registry"
