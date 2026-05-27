@@ -175,6 +175,65 @@ pub(crate) fn lock_pdfium() -> std::sync::MutexGuard<'static, ()> {
 /// resource-dir logic.
 static RESOURCE_DIR_HINT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+// ── Docling (Python-based rich PDF extractor) ─────────────────────────────
+
+/// Cached result of the one-time `import docling` probe. `None` means
+/// not yet checked; `Some(false)` means unavailable (Python absent or
+/// docling not installed).
+static DOCLING_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Path of the helper script written to the temp dir on first use.
+static DOCLING_SCRIPT_PATH: std::sync::OnceLock<std::path::PathBuf> =
+    std::sync::OnceLock::new();
+
+const DOCLING_SCRIPT: &str = include_str!("../../scripts/docling_extract.py");
+
+fn docling_script_path() -> &'static std::path::Path {
+    DOCLING_SCRIPT_PATH
+        .get_or_init(|| {
+            let p = std::env::temp_dir().join("llm_wiki_docling_extract.py");
+            let _ = fs::write(&p, DOCLING_SCRIPT);
+            p
+        })
+        .as_path()
+}
+
+pub(crate) fn is_docling_available() -> bool {
+    *DOCLING_AVAILABLE.get_or_init(|| {
+        let ok = std::process::Command::new("python3")
+            .args(["-c", "import docling"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        eprintln!("[docling] available: {ok}");
+        ok
+    })
+}
+
+/// Run the docling extractor on `path`. `page_start`/`page_end` are
+/// 1-indexed inclusive; pass `None` for the whole document.
+/// Returns the markdown string or an error message.
+pub(crate) fn docling_extract(
+    path: &str,
+    page_start: Option<u32>,
+    page_end: Option<u32>,
+) -> Result<String, String> {
+    let script = docling_script_path();
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(script).arg(path);
+    if let (Some(s), Some(e)) = (page_start, page_end) {
+        cmd.arg(s.to_string()).arg(e.to_string());
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("docling spawn failed: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("docling exited non-zero: {stderr}"));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("docling output not UTF-8: {e}"))
+}
+
 /// Called from Tauri's setup() with the resolved resource directory.
 /// No-op if already set.
 pub fn set_resource_dir_hint(dir: std::path::PathBuf) {
@@ -334,6 +393,20 @@ pub(crate) fn pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, String
 /// `std::sync::Mutex` is non-reentrant.
 fn extract_pdf_text(path: &str) -> Result<String, String> {
     use crate::commands::extract_images::{extract_pdf_markdown, ExtractOptions};
+
+    // Prefer docling when available — it preserves formulas, tables,
+    // and multi-column layout as Markdown. Fall through to pdfium on
+    // any failure so imports always succeed.
+    if is_docling_available() {
+        match docling_extract(path, None, None) {
+            Ok(md) if !md.trim().is_empty() => {
+                eprintln!("[docling] extracted '{path}' ({} chars)", md.len());
+                return Ok(md);
+            }
+            Ok(_) => eprintln!("[docling] empty output for '{path}', falling back to pdfium"),
+            Err(e) => eprintln!("[docling] failed for '{path}': {e} — falling back to pdfium"),
+        }
+    }
 
     let p = Path::new(path);
     let parent = p.parent();

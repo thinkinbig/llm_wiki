@@ -291,7 +291,7 @@ describe("runFollowUpPasses — catch-up", () => {
 
     expect(streamCalls).toBe(2)
     expect(onProgress.mock.calls.map((c) => c[0])).toContain(
-      "Step 2a-catchup retry 1/2: batch 1/1 (1 pages)...",
+      "Step 2a-catchup retry 1/1: batch 1/1 (1 pages)...",
     )
     expect(disk.get("/p/wiki/entities/ion-stoica.md")).toContain(
       "Full biography from catch-up pass.",

@@ -13,6 +13,7 @@
     "test:llm": "vitest run real-llm --no-file-parallelism --reporter=verbose",
     "audit:wiki": "npx vite-node eval/audit-wiki-defects.ts",
     "eval": "npx vite-node eval/run.ts",
+    "chat": "npx vite-node eval/chat-cli.ts",
     "tauri": "tauri"
   },
   "dependencies": {

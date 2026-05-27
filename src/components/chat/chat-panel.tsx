@@ -120,6 +120,39 @@ function ConversationSidebar() {
   )
 }
 
+interface ChatQueryEntity {
+  entity: string  // proper name for gap detection ("Kafka"), empty string for generic queries
+  aspect: string  // focused search string
+}
+
+// Pattern-based entity extraction (no LLM call — latency sensitive).
+// Returns one entry per distinct system/topic that needs its own search.
+function extractChatQueryEntities(question: string): ChatQueryEntity[] {
+  const CROSS_DOC = /\bboth\b.{0,80}\band\b|\bcompare\b|\bvs\.?\b|\bversus\b|\(i\).{0,500}\(ii\)/is
+  if (!CROSS_DOC.test(question)) return [{ entity: "", aspect: question }]
+
+  // (i) … (ii) … structure: search each part independently
+  const parts = question.match(/\(i\)(.*?)\(ii\)(.*)/is)
+  if (parts) {
+    return [
+      { entity: "", aspect: parts[1].trim() },
+      { entity: "", aspect: parts[2].trim() },
+    ]
+  }
+
+  // Named-entity pair: "Kafka and Dynamo", "X vs Y"
+  const STOP = new Set(["Both", "Compare", "What", "How", "Why", "The", "Does", "Can", "Each", "Their"])
+  const pair = question.match(/\b([A-Z][a-zA-Z]{2,})\b.{0,60}\b(?:and|vs\.?|versus)\b.{0,60}\b([A-Z][a-zA-Z]{2,})\b/i)
+  if (pair) {
+    const a = pair[1], b = pair[2]
+    if (!STOP.has(a) && !STOP.has(b) && a !== b) {
+      return [{ entity: a, aspect: a }, { entity: b, aspect: b }]
+    }
+  }
+
+  return [{ entity: "", aspect: question }]
+}
+
 export function ChatPanel() {
   const { t } = useTranslation()
   useSourceFiles() // Keep source file cache warm
@@ -144,6 +177,8 @@ export function ChatPanel() {
   const project = useWikiStore((s) => s.project)
   const llmConfig = useWikiStore((s) => s.llmConfig)
   const setFileTree = useWikiStore((s) => s.setFileTree)
+
+  const [retrievalStatus, setRetrievalStatus] = useState<string | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -209,9 +244,33 @@ export function ChatPanel() {
           readFile(`${pp}/purpose.md`).catch(() => ""),
         ])
 
-        // ── Phase 1: Tokenized search → top 10 ────────────────
-        const searchResults = await searchWiki(pp, text)
+        // ── Phase 1: Intent-aware multi-entity search → merge top 10 ─
+        const chatEntities = extractChatQueryEntities(text)
+        const isMultiEntity = chatEntities.length > 1 && chatEntities.some((e) => e.entity)
+        if (isMultiEntity) {
+          setRetrievalStatus(`Searching separately for: ${chatEntities.map((e) => e.entity || e.aspect.slice(0, 20)).join(", ")}…`)
+        }
+        const rawHitSets = await Promise.all(chatEntities.map((e) => searchWiki(pp, e.aspect)))
+        setRetrievalStatus(null)
+        const mergedByPath = new Map<string, (typeof rawHitSets)[0][0]>()
+        for (const hits of rawHitSets) {
+          for (const hit of hits) {
+            const prev = mergedByPath.get(hit.path)
+            if (!prev || hit.score > prev.score) mergedByPath.set(hit.path, hit)
+          }
+        }
+        const searchResults = [...mergedByPath.values()].sort((a, b) => b.score - a.score)
         const topSearchResults = searchResults.slice(0, 10)
+
+        // Gap detection: entity name absent from top-3 → wiki has no coverage
+        const top3 = searchResults.slice(0, 3)
+        const uncoveredEntities = chatEntities.filter((e) => {
+          if (!e.entity) return false
+          const needle = e.entity.toLowerCase()
+          return !top3.some(
+            (h) => (h.snippet ?? "").toLowerCase().includes(needle) || h.title.toLowerCase().includes(needle)
+          )
+        })
 
         // ── Trim index by relevance if over budget ─────────────
         let index = rawIndex
@@ -313,21 +372,34 @@ export function ChatPanel() {
         systemMessages.push({
           role: "system",
           content: [
-            "You are a knowledgeable wiki assistant. Answer questions based on the wiki content provided below.",
+            "You are a knowledgeable wiki assistant. Answer questions using the wiki content provided below as your primary source.",
             "",
-            "## Rules",
-            "- Answer based ONLY on the numbered wiki pages provided below.",
-            "- If the provided pages don't contain enough information, say so honestly.",
-            "- Use [[wikilink]] syntax to reference wiki pages.",
-            "- When citing information, use the page number in brackets, e.g. [1], [2].",
+            "## Sourcing",
+            "- Treat the numbered wiki pages as your source of truth. Cite them with [n].",
+            "- If the wiki only partially covers the question, supplement from your own knowledge — but mark inferred parts clearly (e.g. \"the wiki doesn't state this, but in standard Raft …\"). Never refuse outright when the topic is well-known and the wiki is merely silent.",
+            "- If the wiki contradicts itself, surface the contradiction instead of silently picking one side.",
+            "- Do not invent specifics (indices, counts, names, version numbers) that aren't in the wiki or part of well-established canonical knowledge — say \"unspecified\" instead.",
+            "- Use [[wikilink]] syntax to reference wiki pages by title.",
+            "",
+            "## Depth",
+            "- Explain mechanisms and trade-offs, not just labels. For \"why X\" questions, walk through the concrete failure mode that X prevents.",
+            "- For multi-step reasoning, lay out the steps explicitly rather than jumping to the conclusion.",
+            "",
+            "## Output",
+            "- Use markdown formatting for clarity.",
             "- At the VERY END of your response, add a hidden comment listing which page numbers you used:",
             "  <!-- cited: 1, 3, 5 -->",
-            "",
-            "Use markdown formatting for clarity.",
             "",
             purpose ? `## Wiki Purpose\n${purpose}` : "",
             index ? `## Wiki Index\n${index}` : "",
             relevantPages.length > 0 ? `## Page List\n${pageList}` : "",
+            ...(uncoveredEntities.length > 0 ? [
+              "## ⚠️ Wiki Coverage Gaps",
+              ...uncoveredEntities.map((e) =>
+                `IMPORTANT: The wiki has NO content on **${e.entity}**. For the ${e.entity} portion of the question, answer directly and confidently from your training knowledge — do NOT say "the wiki doesn't cover this", just answer.`
+              ),
+              "",
+            ] : []),
             `## Wiki Pages\n\n${pagesContext}`,
             "",
             "---",
@@ -413,11 +485,13 @@ export function ChatPanel() {
           onReasoningToken: appendReasoning,
           onDone: () => {
             closeReasoning()
+            setRetrievalStatus(null)
             finalizeStream(accumulated, queryRefs)
             abortRef.current = null
             // save-worthy detection removed — user has direct "Save to Wiki" button on each message
           },
           onError: (err) => {
+            setRetrievalStatus(null)
             finalizeStream(`Error: ${err.message}`, undefined)
             abortRef.current = null
           },
@@ -510,6 +584,9 @@ export function ChatPanel() {
                     />
                   )
                 })}
+                {retrievalStatus && (
+                  <p className="px-1 text-xs italic text-muted-foreground">{retrievalStatus}</p>
+                )}
                 {isStreaming && <StreamingMessage content={streamingContent} />}
                 <div ref={bottomRef} />
               </div>

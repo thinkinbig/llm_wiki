@@ -90,8 +90,8 @@ interface EmbeddingConfig {
    *
    * Users on small-context endpoints (e.g. llama.cpp with n_ctx=512,
    * Ollama `mxbai-embed-large`) should lower `maxChunkChars` to avoid
-   * per-request rejections; fetchEmbedding also auto-halves on
-   * "too long" server errors as a second line of defence.
+   * per-request rejections — fetchEmbedding does not retry on oversize
+   * errors, it just surfaces a message pointing here.
    */
   maxChunkChars?: number
   overlapChunkChars?: number

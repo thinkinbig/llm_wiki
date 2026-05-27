@@ -39,8 +39,8 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. ignore non-frontend trees (Rust backend + graphify pipeline cache)
+      ignored: ["**/src-tauri/**", "**/graphify-out/**"],
     },
   },
 

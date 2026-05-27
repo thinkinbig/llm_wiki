@@ -1,7 +1,7 @@
 /**
  * Unit-level tests for embedding.ts, focused on the pure / mockable
- * pieces: auto-halve retry heuristics and the chunk→page aggregation
- * contract inside `searchByEmbedding`.
+ * pieces: provider wire formats, HTTP error surfacing, and the
+ * chunk→page aggregation contract inside `searchByEmbedding`.
  *
  * The actual HTTP layer and Tauri LanceDB commands are mocked — we're
  * NOT testing Rust vectorstore here (that has its own 15 Rust tests)
@@ -581,149 +581,32 @@ describe("fetchEmbedding — provider wire formats", () => {
     expect(getLastEmbeddingError()).toContain("API key not valid")
   })
 
-  it("auto-halves Gemini requests after an oversize error", async () => {
-    mockHttpFetch
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: { message: "input length exceeds context" } }), {
-          status: 400,
-          statusText: "Bad Request",
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ embedding: { values: [0.1] } }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      )
-
-    const out = await fetchEmbedding("a".repeat(200), {
-      enabled: true,
-      endpoint: "https://generativelanguage.googleapis.com/v1beta",
-      apiKey: "g-key",
-      model: "gemini-embedding-2",
-    })
-
-    expect(out).toEqual([0.1])
-    const firstBody = JSON.parse(String(mockHttpFetch.mock.calls[0][1]?.body))
-    const secondBody = JSON.parse(String(mockHttpFetch.mock.calls[1][1]?.body))
-    expect(firstBody.content.parts[0].text).toHaveLength(200)
-    expect(secondBody.content.parts[0].text).toHaveLength(100)
-  })
 })
 
-// ── fetchEmbedding auto-halve — via embedPage/searchByEmbedding ─────
+// ── fetchEmbedding error surfacing — via searchByEmbedding ─────────
 
-describe("fetchEmbedding (via searchByEmbedding) — auto-halve", () => {
-  it("retries after an oversize 400 with halved text and succeeds", async () => {
-    const responses = [oversizeErrorResponse(400), okResponse([0.1, 0.2])]
-    let call = 0
-    mockHttpFetch.mockImplementation(async () => responses[call++] ?? okResponse([0]))
-    mockInvoke.mockResolvedValueOnce([
-      { chunk_id: "P#0", page_id: "P", chunk_index: 0, chunk_text: "", heading_path: "", score: 0.5 },
-    ])
-
-    const out = await searchByEmbedding("/tmp/p", "a".repeat(2000), cfg, 5)
-    expect(out.map((p) => p.id)).toEqual(["P"])
-    // First call with 2000 chars, second with 1000 chars.
-    expect(mockHttpFetch).toHaveBeenCalledTimes(2)
-    const firstBody = JSON.parse((mockHttpFetch.mock.calls[0][1] as RequestInit).body as string)
-    const secondBody = JSON.parse((mockHttpFetch.mock.calls[1][1] as RequestInit).body as string)
-    expect(firstBody.input.length).toBe(2000)
-    expect(secondBody.input.length).toBe(1000)
-  })
-
-  it("recognises HTTP 413 as oversize and halves", async () => {
-    mockHttpFetch
-      .mockResolvedValueOnce(new Response("", { status: 413, statusText: "Payload Too Large" }))
-      .mockResolvedValueOnce(okResponse([0.1]))
-    mockInvoke.mockResolvedValueOnce([
-      { chunk_id: "P#0", page_id: "P", chunk_index: 0, chunk_text: "", heading_path: "", score: 0.5 },
-    ])
-    await searchByEmbedding("/tmp/p", "a".repeat(500), cfg, 5)
-    expect(mockHttpFetch).toHaveBeenCalledTimes(2)
-  })
-
-  it("does NOT halve on auth errors (401) — retries there would be pointless", async () => {
+describe("fetchEmbedding (via searchByEmbedding) — error surfacing", () => {
+  it("returns [] and surfaces the full 'API <status> <statusText> — <body>' shape on auth errors", async () => {
     mockHttpFetch.mockResolvedValueOnce(
       new Response(JSON.stringify({ error: "Invalid API key" }), { status: 401, statusText: "Unauthorized" }),
     )
     const out = await searchByEmbedding("/tmp/p", "hello", cfg, 5)
     expect(out).toEqual([])
     expect(mockHttpFetch).toHaveBeenCalledTimes(1)
-    // Pin the full "API <status> <statusText> — <body>" shape so a
-    // regression that dropped the statusText or body text is caught.
     const err = getLastEmbeddingError()!
     expect(err).toContain("API 401 Unauthorized")
     expect(err).toContain("Invalid API key")
     expect(err).toContain(cfg.endpoint)
   })
 
-  it("gives up after 3 halvings and surfaces the 'rejected at N chars' message", async () => {
-    // A fresh Response instance per call — `mockResolvedValue` returns
-    // the same object repeatedly and Response bodies can only be
-    // consumed once, which would mask the real retry count.
-    mockHttpFetch.mockImplementation(async () => oversizeErrorResponse(400))
+  it("surfaces the friendly 'lower Max Chunk Chars' hint when the endpoint rejects an oversize input", async () => {
+    mockHttpFetch.mockResolvedValueOnce(oversizeErrorResponse(400))
     const out = await searchByEmbedding("/tmp/p", "a".repeat(2000), cfg, 5)
     expect(out).toEqual([])
-    // 2000 → 1000 → 500 → 250: 4 attempts (initial + 3 halvings).
-    expect(mockHttpFetch).toHaveBeenCalledTimes(4)
-    // Pin the distinctive prefix — loosely matching /chars/ would pass
-    // for BOTH the exhausted-retry case and the 64-char-floor case,
-    // which are different bug signatures.
+    expect(mockHttpFetch).toHaveBeenCalledTimes(1)
     const err = getLastEmbeddingError()!
-    expect(err).toContain("Endpoint rejected input even at")
-    expect(err).toContain("250 chars")
+    expect(err).toContain("oversize")
     expect(err).toContain("Lower Settings → Embedding → Max Chunk Chars")
-  })
-
-  it("halving floor: 128-char input stops after 2 attempts (128 → 64; 64 is not > 64 so no further halving)", async () => {
-    mockHttpFetch.mockImplementation(async () => oversizeErrorResponse(400))
-    await searchByEmbedding("/tmp/p", "a".repeat(128), cfg, 5)
-    expect(mockHttpFetch).toHaveBeenCalledTimes(2)
-    const lens = mockHttpFetch.mock.calls.map(
-      (c) => JSON.parse((c[1] as RequestInit).body as string).input.length,
-    )
-    expect(lens).toEqual([128, 64])
-  })
-
-  it("halving floor: 130-char input produces 3 attempts (130 → 65 is > 64 so halves once more to 32)", async () => {
-    mockHttpFetch.mockImplementation(async () => oversizeErrorResponse(400))
-    await searchByEmbedding("/tmp/p", "a".repeat(130), cfg, 5)
-    expect(mockHttpFetch).toHaveBeenCalledTimes(3)
-    const lens = mockHttpFetch.mock.calls.map(
-      (c) => JSON.parse((c[1] as RequestInit).body as string).input.length,
-    )
-    expect(lens).toEqual([130, 65, 32])
-  })
-
-  it("recognizes a variety of oversize error phrases (not just 'exceeds maximum context')", async () => {
-    // Table-driven: every phrase that looksLikeOversizeError treats as
-    // oversize must trigger the halve path. If a regression changes
-    // the phrase list, the matching case stops halving (1 call instead
-    // of 2) and this test catches it.
-    const phrases = [
-      "this input is too long for the model",
-      "context length 512 surpassed",
-      "token limit hit",
-      "max_tokens exceeded for this request",
-      "max tokens 2048 is less than input",
-      "input length 3200 is over budget",
-    ]
-    for (const phrase of phrases) {
-      mockHttpFetch.mockReset()
-      mockHttpFetch
-        .mockResolvedValueOnce(
-          new Response(JSON.stringify({ error: phrase }), { status: 400, statusText: "Bad Request" }),
-        )
-        .mockResolvedValueOnce(okResponse([0.1]))
-      mockInvoke.mockReset()
-      mockInvoke.mockResolvedValueOnce([
-        { chunk_id: "P#0", page_id: "P", chunk_index: 0, chunk_text: "", heading_path: "", score: 0.5 },
-      ])
-      await searchByEmbedding("/tmp/p", "a".repeat(500), cfg, 5)
-      // Exactly 2 fetches = initial rejected + halved succeeded.
-      expect(mockHttpFetch, `phrase="${phrase}"`).toHaveBeenCalledTimes(2)
-    }
   })
 
   it("surfaces a 'Network error' message when the fetch itself throws a TypeError", async () => {
@@ -820,8 +703,7 @@ describe("embedPage", () => {
     let call = 0
     mockHttpFetch.mockImplementation(async () => {
       const i = call++
-      // 404 Not Found — not an oversize phrase, so fetchEmbedding
-      // returns null immediately without halving/retrying.
+      // 404 Not Found — fetchEmbedding returns null immediately.
       if (i === 1) return new Response("not found", { status: 404, statusText: "Not Found" })
       return okResponse([0.5])
     })

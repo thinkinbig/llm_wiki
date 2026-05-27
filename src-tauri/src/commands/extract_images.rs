@@ -986,6 +986,24 @@ pub fn extract_pdf_outline(path: &str) -> Result<Vec<PdfChapter>, String> {
 /// Extract the text of PDF pages in the inclusive 0-indexed range
 /// [page_start, page_end] as markdown with `## Page N` sub-headers.
 pub fn extract_pdf_chapter_text(path: &str, page_start: u32, page_end: u32) -> Result<String, String> {
+    // page_start/page_end are 0-indexed from the TS caller; docling
+    // expects 1-indexed, so add 1 to both.
+    if crate::commands::fs::is_docling_available() {
+        match crate::commands::fs::docling_extract(path, Some(page_start + 1), Some(page_end + 1)) {
+            Ok(md) if !md.trim().is_empty() => {
+                eprintln!(
+                    "[docling] chapter text '{path}' pages {}-{} ({} chars)",
+                    page_start + 1,
+                    page_end + 1,
+                    md.len()
+                );
+                return Ok(md);
+            }
+            Ok(_) => eprintln!("[docling] empty chapter output for '{path}', falling back to pdfium"),
+            Err(e) => eprintln!("[docling] chapter extraction failed for '{path}': {e} — falling back to pdfium"),
+        }
+    }
+
     use pdfium_render::prelude::*;
 
     let _guard = crate::commands::fs::lock_pdfium();

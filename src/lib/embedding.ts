@@ -4,7 +4,6 @@
  *   1. chunkMarkdown(content)        (src/lib/text-chunker.ts)
  *   2. for each chunk:
  *        fetchEmbedding(title + heading_path + chunk_text)
- *        with auto-halve retry on "input too long" errors
  *   3. vector_upsert_chunks(page_id, [{chunk_index, chunk_text,
  *      heading_path, embedding}, …])
  *
@@ -42,15 +41,13 @@ export function getLastEmbeddingError(): string | null {
   return lastEmbeddingError
 }
 
-// ── fetchEmbedding with auto-halve retry ────────────────────────────────
+// ── fetchEmbedding ──────────────────────────────────────────────────────
 
 /**
  * Heuristic: does this error response look like an "input too long /
- * exceeds model context / payload too large" rejection? True for all
- * the phrasings we've seen from OpenAI, LM Studio, llama.cpp,
- * Ollama, and Azure. Safer to over-match than under-match — a false
- * positive just means a retry at half size, which will still succeed
- * on a real auth/model-id error (it won't) or just log the same error.
+ * exceeds model context / payload too large" rejection? Used only to
+ * generate a friendlier error message that tells the user to lower
+ * Settings → Embedding → Max Chunk Chars.
  */
 export function looksLikeOversizeError(httpStatus: number, body: string): boolean {
   if (httpStatus === 413) return true
@@ -68,25 +65,22 @@ export function looksLikeOversizeError(httpStatus: number, body: string): boolea
 }
 
 /**
- * POST one embedding request; on an oversize rejection, halve the text
- * and retry up to `maxRetries` times. Returns null on definitive
- * failure (auth, network, dim mismatch, retries exhausted) with a
- * human-readable reason left in `lastEmbeddingError`.
- *
- * The returned vector represents the (possibly truncated) text that
- * actually got through. Chunker config should be tuned to minimise
- * truncation — this is a safety net, not the main line of defence.
+ * POST one embedding request. Returns null on any failure (auth,
+ * network, oversize, dim mismatch) with a human-readable reason left
+ * in `lastEmbeddingError`. Chunker config (Max Chunk Chars) should be
+ * tuned to keep inputs under the endpoint's context — this function
+ * makes no attempt to recover by truncation.
  */
 export async function fetchEmbedding(
   text: string,
   cfg: EmbeddingConfig,
-  maxRetries = 3,
 ): Promise<number[] | null> {
   if (!cfg.endpoint) return null
 
+  const model = cfg.model.trim()
   const isGoogleNative = isGoogleEmbeddingConfig(cfg)
   const isAzure = isAzureEmbeddingConfig(cfg)
-  const endpoint = isGoogleNative ? googleEmbeddingEndpoint(cfg) : cfg.endpoint
+  const endpoint = isGoogleNative ? googleEmbeddingEndpoint({ ...cfg, model }) : cfg.endpoint
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (cfg.apiKey) {
     if (isGoogleNative) {
@@ -98,84 +92,56 @@ export async function fetchEmbedding(
     }
   }
 
-  let current = text
-  let attempts = 0
-  while (attempts <= maxRetries) {
-    attempts++
-    try {
-      const httpFetch = await getHttpFetch()
-      const resp = await httpFetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(
-          isGoogleNative
-            ? googleEmbeddingBody(cfg.model, current, cfg.outputDimensionality)
-            : { model: cfg.model, input: current },
-        ),
-      })
+  try {
+    const httpFetch = await getHttpFetch()
+    const resp = await httpFetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(
+        isGoogleNative
+          ? googleEmbeddingBody(model, text, cfg.outputDimensionality)
+          : { model, input: text },
+      ),
+    })
 
-      if (resp.ok) {
-        const data = await resp.json()
-        const embedding = isGoogleNative
-          ? data?.embedding?.values ?? null
-          : data?.data?.[0]?.embedding ?? null
-        if (isNonEmptyNumberArray(embedding)) {
-          lastEmbeddingError = null
-          return embedding
-        }
-        const expectedShape = isGoogleNative ? "embedding.values" : "data[0].embedding"
-        lastEmbeddingError = `Embedding response missing ${expectedShape} (got ${JSON.stringify(data).slice(0, 200)})`
-        console.warn(`[Embedding] ${lastEmbeddingError}`)
-        return null
+    if (resp.ok) {
+      const data = await resp.json()
+      const embedding = isGoogleNative
+        ? data?.embedding?.values ?? null
+        : data?.data?.[0]?.embedding ?? null
+      if (isNonEmptyNumberArray(embedding)) {
+        lastEmbeddingError = null
+        return embedding
       }
-
-      // Non-OK: try to read the body for an oversize hint.
-      let bodyText = ""
-      try {
-        bodyText = await resp.text()
-      } catch {
-        // ignore — some servers return empty bodies on error
-      }
-
-      if (looksLikeOversizeError(resp.status, bodyText)) {
-        // Can we still halve-and-retry? Need room on both axes:
-        // text not yet at the 64-char floor, and retry budget left.
-        if (current.length > 64 && attempts <= maxRetries) {
-          const prev = current.length
-          current = current.slice(0, Math.floor(current.length / 2))
-          console.warn(
-            `[Embedding] auto-halving after HTTP ${resp.status} at ${prev} chars → retrying at ${current.length} chars (attempt ${attempts}/${maxRetries + 1})`,
-          )
-          continue
-        }
-        // Out of retries on a SERVER-oversize error — give the user a
-        // message that names the smallest size that still failed so
-        // they can tune Settings → Embedding accordingly.
-        lastEmbeddingError = `Endpoint rejected input even at ${current.length} chars — server context smaller than expected. Lower Settings → Embedding → Max Chunk Chars (${bodyText.slice(0, 160)}).`
-        console.warn(`[Embedding] ${lastEmbeddingError}`)
-        return null
-      }
-
-      // Non-oversize definitive failure (auth, rate limit, server down, …).
-      lastEmbeddingError = `API ${resp.status} ${resp.statusText}${bodyText ? ` — ${bodyText.slice(0, 200)}` : ""} at ${endpoint}`
-      console.warn(`[Embedding] ${lastEmbeddingError}`)
-      return null
-    } catch (err) {
-      if (isFetchNetworkError(err)) {
-        lastEmbeddingError = `Network error reaching ${endpoint}. Check endpoint URL, API key, and connectivity.`
-      } else {
-        lastEmbeddingError = err instanceof Error ? err.message : String(err)
-      }
+      const expectedShape = isGoogleNative ? "embedding.values" : "data[0].embedding"
+      lastEmbeddingError = `Embedding response missing ${expectedShape} (got ${JSON.stringify(data).slice(0, 200)})`
       console.warn(`[Embedding] ${lastEmbeddingError}`)
       return null
     }
-  }
 
-  // Exhausted retries (only reachable if every halving round triggered
-  // the retry branch and then the loop condition ended).
-  lastEmbeddingError = `Embedding endpoint rejected every size down to ${current.length} chars — the server's context is smaller than ${current.length * 2}. Lower Settings → Embedding → Max Chunk Chars.`
-  console.warn(`[Embedding] ${lastEmbeddingError}`)
-  return null
+    let bodyText = ""
+    try {
+      bodyText = await resp.text()
+    } catch {
+      // ignore — some servers return empty bodies on error
+    }
+
+    if (looksLikeOversizeError(resp.status, bodyText)) {
+      lastEmbeddingError = `Endpoint rejected ${text.length}-char input as oversize. Lower Settings → Embedding → Max Chunk Chars (${bodyText.slice(0, 160)}).`
+    } else {
+      lastEmbeddingError = `API ${resp.status} ${resp.statusText}${bodyText ? ` — ${bodyText.slice(0, 200)}` : ""} at ${endpoint}`
+    }
+    console.warn(`[Embedding] ${lastEmbeddingError}`)
+    return null
+  } catch (err) {
+    if (isFetchNetworkError(err)) {
+      lastEmbeddingError = `Network error reaching ${endpoint}. Check endpoint URL, API key, and connectivity.`
+    } else {
+      lastEmbeddingError = err instanceof Error ? err.message : String(err)
+    }
+    console.warn(`[Embedding] ${lastEmbeddingError}`)
+    return null
+  }
 }
 
 function isNonEmptyNumberArray(value: unknown): value is number[] {
@@ -365,16 +331,29 @@ export async function embedPage(
   })
   if (chunks.length === 0) return
 
+  // Embed chunks with bounded concurrency. Each fetchEmbedding call is
+  // independent; serialising them was the dominant per-page latency.
+  // Cap parallelism so we don't trip provider rate limits — 5 is the
+  // safe default for OpenAI/Azure/Google embedding endpoints.
+  const EMBED_CONCURRENCY = 5
+  const vectors: (number[] | null)[] = new Array(chunks.length)
+  for (let i = 0; i < chunks.length; i += EMBED_CONCURRENCY) {
+    const slice = chunks.slice(i, i + EMBED_CONCURRENCY)
+    const sliceVecs = await Promise.all(
+      slice.map((chunk) => fetchEmbedding(enrichChunkForEmbedding(title, chunk), cfg)),
+    )
+    for (let j = 0; j < sliceVecs.length; j++) vectors[i + j] = sliceVecs[j]
+  }
+
   const rows: ChunkUpsertInput[] = []
   let failedChunks = 0
-  for (const chunk of chunks) {
-    const embedText = enrichChunkForEmbedding(title, chunk)
-    const vec = await fetchEmbedding(embedText, cfg)
+  for (let i = 0; i < chunks.length; i++) {
+    const vec = vectors[i]
     if (vec) {
       rows.push({
-        chunkIndex: chunk.index,
-        chunkText: chunk.text,
-        headingPath: chunk.headingPath,
+        chunkIndex: chunks[i].index,
+        chunkText: chunks[i].text,
+        headingPath: chunks[i].headingPath,
         embedding: vec,
       })
     } else {

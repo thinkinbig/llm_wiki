@@ -369,7 +369,7 @@ const INGEST_ENTITY_BATCH_SIZE = 20
 // pages the model omitted from the first pass.
 const INGEST_CATCHUP_BATCH_SIZE = 5
 /** Tail catch-up passes for entities still missing after a batch LLM call. */
-const MAX_CATCHUP_RETRY_ROUNDS = 2
+const MAX_CATCHUP_RETRY_ROUNDS = 1
 // Maximum slug candidates surfaced to the model per entity batch.
 const WIKILINK_CANDIDATE_LIMIT = 30
 
@@ -547,16 +547,21 @@ async function runChunkedAnalysis(
   // ── Step 1: Analysis (one pass per chunk) ────────────────────
   // Each chunk gets its own structured analysis. We concatenate the
   // outputs with a header line per part so Generation can tell which
-  // section of the document each analysis covers.
-  const analysisParts: string[] = []
+  // section of the document each analysis covers. Chunks are analyzed
+  // with bounded concurrency — they share no per-chunk state and are
+  // joined by index, so order is preserved regardless of completion
+  // order.
+  const ANALYSIS_CONCURRENCY = 3
+  const analysisParts: string[] = new Array(contentChunks.length)
   const stride = Math.max(1, analysisChunkSize - INGEST_CHUNK_OVERLAP_CHARS)
+  let analysisCompleted = 0
 
-  for (let i = 0; i < contentChunks.length; i++) {
+  const analyzeChunk = async (i: number): Promise<void> => {
     const chunkContent = contentChunks[i]
     const chunkLabel = isMultiChunk ? ` (part ${i + 1}/${contentChunks.length})` : ""
-    useActivityStore.getState().updateItem(activityId, { detail: `Step 1/2: Analyzing source...${chunkLabel}` })
 
     let chunkAnalysis = ""
+    let chunkError: Error | null = null
 
     await streamChat(
       runCtx.llmConfig,
@@ -570,31 +575,40 @@ async function runChunkedAnalysis(
       {
         onToken: (token) => { chunkAnalysis += token },
         onDone: () => {},
-        onError: (err) => {
-          useActivityStore.getState().updateItem(activityId, {
-            status: "error",
-            detail: `Analysis failed${chunkLabel}: ${err.message}`,
-          })
-        },
+        onError: (err) => { chunkError = err },
       },
       runCtx.signal,
       { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 8192 },
     )
 
-    const stepActivity = useActivityStore.getState().items.find((it) => it.id === activityId)
-    if (stepActivity?.status === "error") {
-      throw new Error(stepActivity.detail || "Analysis stream failed")
-    }
+    if (chunkError) throw new Error(`Analysis failed${chunkLabel}: ${(chunkError as Error).message}`)
 
     if (isMultiChunk) {
       const startChar = i * stride
       const endChar = Math.min(startChar + analysisChunkSize, runCtx.source.enriched.length)
-      analysisParts.push(
-        `## Stage 1 Analysis — Part ${i + 1}/${contentChunks.length} (chars ${startChar}–${endChar})\n\n${chunkAnalysis}`,
-      )
+      analysisParts[i] = `## Stage 1 Analysis — Part ${i + 1}/${contentChunks.length} (chars ${startChar}–${endChar})\n\n${chunkAnalysis}`
     } else {
-      analysisParts.push(chunkAnalysis)
+      analysisParts[i] = chunkAnalysis
     }
+
+    analysisCompleted++
+    useActivityStore.getState().updateItem(activityId, {
+      detail: `Step 1/2: Analyzing source... ${analysisCompleted}/${contentChunks.length}`,
+    })
+  }
+
+  useActivityStore.getState().updateItem(activityId, {
+    detail: isMultiChunk
+      ? `Step 1/2: Analyzing source... 0/${contentChunks.length}`
+      : `Step 1/2: Analyzing source...`,
+  })
+
+  for (let i = 0; i < contentChunks.length; i += ANALYSIS_CONCURRENCY) {
+    const slice = Array.from(
+      { length: Math.min(ANALYSIS_CONCURRENCY, contentChunks.length - i) },
+      (_, j) => i + j,
+    )
+    await Promise.all(slice.map((idx) => analyzeChunk(idx)))
   }
 
   const result: ChunkedAnalysisResult = {
@@ -682,18 +696,28 @@ async function runBatchedEntityGeneration(
       await saveCheckpoint(runCtx.projectPath, runCtx.fileName, runCtx.checkpoint)
     }
 
-    for (let bi = 0; bi < batches.length; bi++) {
-      if (completedSet.has(bi)) continue
-      const batch = batches[bi]
-      useActivityStore.getState().updateItem(activityId, {
-        detail: `Step 2a/2b: Writing entity batch ${bi + 1}/${batches.length} (${batch.length} pages)...`,
-      })
+    // Run entity batches with bounded concurrency. Per-batch inputs are
+    // loop-invariant (manifest + Stage 1 analysis); each batch writes a
+    // disjoint set of FILE paths so parallel disk writes don't collide.
+    // The only shared mutable state is the checkpoint — we batch its
+    // save to once per concurrency-chunk to avoid the interleaved-write
+    // race that would let an older snapshot land on disk after a newer
+    // one.
+    const ENTITY_BATCH_CONCURRENCY = 2
+    const pendingIndices = Array.from({ length: batches.length }, (_, i) => i)
+      .filter((bi) => !completedSet.has(bi))
+    let batchesCompleted = batches.length - pendingIndices.length
 
-      // Pre-filter wikilink targets (≤30) so the model attends to every slug.
-      // Re-scans wiki/ each batch so pages from earlier batches are included.
+    const runOneBatch = async (bi: number): Promise<{
+      writtenPaths: string[]
+      warnings: string[]
+      hardFailures: string[]
+    }> => {
+      const batch = batches[bi]
       const wikilinkTargets = await buildWikilinkCandidates(runCtx.projectPath, parsedEntities!, batch)
 
       let batchOutput = ""
+      let batchError: Error | null = null
       await streamChat(
         runCtx.llmConfig,
         [
@@ -721,23 +745,15 @@ async function runBatchedEntityGeneration(
         {
           onToken: (token) => { batchOutput += token },
           onDone: () => {},
-          onError: (err) => {
-            useActivityStore.getState().updateItem(activityId, {
-              status: "error",
-              detail: `Entity batch ${bi + 1}/${batches.length} failed: ${err.message}`,
-            })
-          },
+          onError: (err) => { batchError = err },
         },
         runCtx.signal,
         { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 8192 },
       )
 
-      const batchActivity = useActivityStore.getState().items.find((it) => it.id === activityId)
-      if (batchActivity?.status === "error") {
-        throw new Error(batchActivity.detail || "Entity batch stream failed")
-      }
+      if (batchError) throw new Error(`Entity batch ${bi + 1}/${batches.length} failed: ${(batchError as Error).message}`)
 
-      const result = await writeFileBlocks(
+      return await writeFileBlocks(
         {
           projectPath: runCtx.projectPath,
           llmConfig: runCtx.llmConfig,
@@ -746,15 +762,32 @@ async function runBatchedEntityGeneration(
         },
         batchOutput,
       )
-      batchWrittenPaths.push(...result.writtenPaths)
-      batchWarnings.push(...result.warnings)
-      batchHardFailures.push(...result.hardFailures)
+    }
 
-      // Mark this batch durable. A crash before this save reruns the batch
-      // on retry, which is correct (idempotent — `mergePageContent` re-folds
-      // identical content). A crash after the save skips the batch on retry.
-      if (runCtx.checkpoint) {
+    useActivityStore.getState().updateItem(activityId, {
+      detail: `Step 2a/2b: Writing entity batches... ${batchesCompleted}/${batches.length}`,
+    })
+
+    for (let i = 0; i < pendingIndices.length; i += ENTITY_BATCH_CONCURRENCY) {
+      const chunkIndices = pendingIndices.slice(i, i + ENTITY_BATCH_CONCURRENCY)
+      const chunkResults = await Promise.all(chunkIndices.map((bi) => runOneBatch(bi)))
+
+      // Apply this chunk's results to the run-level accumulators in
+      // deterministic index order, then persist the checkpoint once.
+      for (let j = 0; j < chunkIndices.length; j++) {
+        const bi = chunkIndices[j]
+        const r = chunkResults[j]
+        batchWrittenPaths.push(...r.writtenPaths)
+        batchWarnings.push(...r.warnings)
+        batchHardFailures.push(...r.hardFailures)
         completedSet.add(bi)
+      }
+      batchesCompleted += chunkIndices.length
+      useActivityStore.getState().updateItem(activityId, {
+        detail: `Step 2a/2b: Writing entity batches... ${batchesCompleted}/${batches.length}`,
+      })
+
+      if (runCtx.checkpoint) {
         runCtx.checkpoint = {
           ...runCtx.checkpoint,
           completedMainBatches: Array.from(completedSet).sort((a, b) => a - b),
